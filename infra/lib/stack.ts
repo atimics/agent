@@ -3,7 +3,6 @@ import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as ecs from "aws-cdk-lib/aws-ecs";
 import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as iam from "aws-cdk-lib/aws-iam";
-import * as ssm from "aws-cdk-lib/aws-ssm";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as apigwv2 from "aws-cdk-lib/aws-apigatewayv2";
 import * as apigwv2Integrations from "aws-cdk-lib/aws-apigatewayv2-integrations";
@@ -12,40 +11,22 @@ import * as lambda from "aws-cdk-lib/aws-lambda";
 import { Construct } from "constructs";
 import * as path from "path";
 
+// SSM parameter names — created out-of-band (already exist)
+const PARAM_GITHUB_TOKEN = "/github-agent/GITHUB_TOKEN";
+const PARAM_WEBHOOK_SECRET = "/github-agent/GITHUB_WEBHOOK_SECRET";
+const PARAM_OPENROUTER_KEY = "/github-agent/OPENROUTER_API_KEY";
+
 export class GitHubAgentStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    // -------------------------------------------------------
-    // SSM Parameters (create placeholders — fill values manually)
-    // -------------------------------------------------------
-    const githubTokenParam = new ssm.StringParameter(this, "GitHubToken", {
-      parameterName: "/github-agent/GITHUB_TOKEN",
-      stringValue: "REPLACE_ME",
-      description: "GitHub personal access token",
-      tier: ssm.ParameterTier.STANDARD,
-    });
-
-    const webhookSecretParam = new ssm.StringParameter(
-      this,
-      "GitHubWebhookSecret",
-      {
-        parameterName: "/github-agent/GITHUB_WEBHOOK_SECRET",
-        stringValue: "REPLACE_ME",
-        description: "GitHub webhook secret for HMAC validation",
-        tier: ssm.ParameterTier.STANDARD,
-      }
-    );
-
-    const openrouterKeyParam = new ssm.StringParameter(
-      this,
-      "OpenRouterApiKey",
-      {
-        parameterName: "/github-agent/OPENROUTER_API_KEY",
-        stringValue: "REPLACE_ME",
-        description: "OpenRouter API key",
-        tier: ssm.ParameterTier.STANDARD,
-      }
+    const ssmParamArns = [
+      PARAM_GITHUB_TOKEN,
+      PARAM_WEBHOOK_SECRET,
+      PARAM_OPENROUTER_KEY,
+    ].map(
+      (name) =>
+        `arn:aws:ssm:${this.region}:${this.account}:parameter${name}`
     );
 
     // -------------------------------------------------------
@@ -63,7 +44,6 @@ export class GitHubAgentStack extends cdk.Stack {
       ],
     });
 
-    // Security group for Fargate tasks — egress only
     const taskSecurityGroup = new ec2.SecurityGroup(this, "TaskSG", {
       vpc,
       description: "Security group for GitHub agent Fargate tasks",
@@ -85,7 +65,7 @@ export class GitHubAgentStack extends cdk.Stack {
     });
 
     // -------------------------------------------------------
-    // ECS Cluster (Fargate only — no EC2 capacity)
+    // ECS Cluster
     // -------------------------------------------------------
     const cluster = new ecs.Cluster(this, "AgentCluster", {
       vpc,
@@ -100,15 +80,10 @@ export class GitHubAgentStack extends cdk.Stack {
       description: "Role for GitHub agent Fargate task",
     });
 
-    // Task role needs SSM access to read secrets at runtime
     taskRole.addToPolicy(
       new iam.PolicyStatement({
         actions: ["ssm:GetParameter"],
-        resources: [
-          githubTokenParam.parameterArn,
-          webhookSecretParam.parameterArn,
-          openrouterKeyParam.parameterArn,
-        ],
+        resources: ssmParamArns,
       })
     );
 
@@ -126,7 +101,6 @@ export class GitHubAgentStack extends cdk.Stack {
         streamPrefix: "github-agent",
         logRetention: logs.RetentionDays.TWO_WEEKS,
       }),
-      // Environment variables are passed as overrides when the task is launched
     });
 
     // -------------------------------------------------------
@@ -143,7 +117,6 @@ export class GitHubAgentStack extends cdk.Stack {
         minify: true,
         sourceMap: true,
         target: "node20",
-        // AWS SDK v3 clients used in handler need to be bundled
         externalModules: [],
       },
       environment: {
@@ -152,13 +125,12 @@ export class GitHubAgentStack extends cdk.Stack {
         CONTAINER_NAME: containerName,
         SUBNETS: vpc.publicSubnets.map((s) => s.subnetId).join(","),
         SECURITY_GROUP: taskSecurityGroup.securityGroupId,
-        WEBHOOK_SECRET_PARAM: webhookSecretParam.parameterName,
-        GITHUB_TOKEN_PARAM: githubTokenParam.parameterName,
-        OPENROUTER_API_KEY_PARAM: openrouterKeyParam.parameterName,
+        WEBHOOK_SECRET_PARAM: PARAM_WEBHOOK_SECRET,
+        GITHUB_TOKEN_PARAM: PARAM_GITHUB_TOKEN,
+        OPENROUTER_API_KEY_PARAM: PARAM_OPENROUTER_KEY,
       },
     });
 
-    // Lambda IAM: run ECS tasks
     webhookHandler.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["ecs:RunTask"],
@@ -166,7 +138,6 @@ export class GitHubAgentStack extends cdk.Stack {
       })
     );
 
-    // Lambda needs to pass the task role and execution role to ECS
     webhookHandler.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["iam:PassRole"],
@@ -177,15 +148,10 @@ export class GitHubAgentStack extends cdk.Stack {
       })
     );
 
-    // Lambda IAM: read SSM parameters
     webhookHandler.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["ssm:GetParameter"],
-        resources: [
-          githubTokenParam.parameterArn,
-          webhookSecretParam.parameterArn,
-          openrouterKeyParam.parameterArn,
-        ],
+        resources: ssmParamArns,
       })
     );
 
