@@ -113,8 +113,8 @@ export class GitHubAgentStack extends cdk.Stack {
     );
 
     const taskDefinition = new ecs.FargateTaskDefinition(this, "AgentTask", {
-      memoryLimitMiB: 512,
-      cpu: 256,
+      memoryLimitMiB: 2048,
+      cpu: 1024,
       taskRole,
     });
 

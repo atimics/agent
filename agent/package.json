@@ -1,14 +1,6 @@
 {
-  "name": "@ratimics/agent",
+  "name": "@ratimics/github-agent",
   "version": "1.0.0",
   "private": true,
-  "type": "module",
-  "scripts": {
-    "build": "tsc",
-    "start": "node dist/index.js"
-  },
-  "devDependencies": {
-    "typescript": "^5.4.0",
-    "@types/node": "^20.11.0"
-  }
+  "description": "Fargate container that runs Claude Code on GitHub issues/PRs"
 }
