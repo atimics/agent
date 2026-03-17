@@ -166,10 +166,6 @@ function formatLaunchFailure(error: unknown): string {
   return "Unknown launch error";
 }
 
-function isResumeConfirmation(body: string): boolean {
-  return /(^|\n)\s*\/agent\s+(continue|resume)\b/i.test(body);
-}
-
 function verifySignature(
   payload: string,
   signature: string,
@@ -250,25 +246,6 @@ export async function handler(event: {
     repoName = payload.repository.name;
     issueNumber = payload.pull_request.number;
     isPR = true;
-  } else if (ghEvent === "issue_comment" && payload.action === "created") {
-    const issueLabels =
-      payload.issue?.labels?.map((label: { name?: string }) => label.name?.toLowerCase()) ?? [];
-    const isWaiting = issueLabels.includes(SIGNAL_LABEL_WAITING);
-    if (!isWaiting) {
-      console.log("Ignoring issue comment because the issue is not waiting");
-      return { statusCode: 200, body: "Ignored: issue not in waiting state" };
-    }
-
-    const commentBody = payload.comment?.body ?? "";
-    if (!isResumeConfirmation(commentBody)) {
-      console.log("Ignoring issue comment because it is not a resume confirmation");
-      return { statusCode: 200, body: "Ignored: not a resume confirmation" };
-    }
-
-    repoOwner = payload.repository.owner.login;
-    repoName = payload.repository.name;
-    issueNumber = payload.issue.number;
-    isPR = Boolean(payload.issue.pull_request);
   } else {
     console.log(`Ignoring event: ${ghEvent}/${payload.action}`);
     return { statusCode: 200, body: `Ignored: ${ghEvent}/${payload.action}` };
