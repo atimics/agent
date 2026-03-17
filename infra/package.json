@@ -9,13 +9,15 @@
     "deploy": "cdk deploy --all"
   },
   "dependencies": {
+    "@aws-sdk/client-ecs": "^3.1010.0",
+    "@aws-sdk/client-ssm": "^3.1010.0",
     "aws-cdk-lib": "^2.170.0",
     "constructs": "^10.4.2"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "aws-cdk": "^2.170.0",
     "esbuild": "^0.24.0",
-    "typescript": "^5.7.0",
-    "aws-cdk": "^2.170.0"
+    "typescript": "^5.7.0"
   }
 }
