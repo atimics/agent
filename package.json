@@ -1,0 +1,12 @@
+{
+  "name": "github-agent",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "npm run build:lambda && npm run build:agent",
+    "build:lambda": "cd infra && npm run build",
+    "build:agent": "cd agent && npm run build",
+    "deploy": "cd infra && npx cdk deploy --all",
+    "synth": "cd infra && npx cdk synth"
+  }
+}
