@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -Eeuo pipefail
 
 # --- Required env vars (passed by Lambda via Fargate overrides) ---
 : "${GITHUB_TOKEN:?Missing GITHUB_TOKEN}"
@@ -8,20 +8,73 @@ set -euo pipefail
 : "${REPO_NAME:?Missing REPO_NAME}"
 : "${ISSUE_NUMBER:?Missing ISSUE_NUMBER}"
 : "${IS_PR:=false}"
+: "${TRIGGER_LABEL:=agent}"
+: "${SIGNAL_LABEL_RUNNING:=agent:running}"
+: "${SIGNAL_LABEL_FAILED:=agent:failed}"
+: "${SIGNAL_LABEL_SUCCEEDED:=agent:succeeded}"
 
 REPO="${REPO_OWNER}/${REPO_NAME}"
+CURRENT_STAGE="startup"
+RUN_STATUS="failed"
+SIGNAL_LABELS=(
+  "${SIGNAL_LABEL_RUNNING}"
+  "${SIGNAL_LABEL_FAILED}"
+  "${SIGNAL_LABEL_SUCCEEDED}"
+)
+
+set_signal_label() {
+  local target_label="$1"
+  local label
+
+  for label in "${SIGNAL_LABELS[@]}"; do
+    if [ "${label}" != "${target_label}" ]; then
+      gh issue edit "${ISSUE_NUMBER}" --remove-label "${label}" -R "${REPO}" >/dev/null 2>&1 || true
+    fi
+  done
+
+  gh issue edit "${ISSUE_NUMBER}" --remove-label "${TRIGGER_LABEL}" -R "${REPO}" >/dev/null 2>&1 || true
+  gh issue edit "${ISSUE_NUMBER}" --add-label "${target_label}" -R "${REPO}" >/dev/null 2>&1 || true
+}
+
+on_exit() {
+  local exit_code=$?
+
+  set +e
+
+  if [ "${RUN_STATUS}" = "succeeded" ] && [ "${exit_code}" -eq 0 ]; then
+    set_signal_label "${SIGNAL_LABEL_SUCCEEDED}"
+    echo "=== Agent finished ==="
+    exit 0
+  fi
+
+  set_signal_label "${SIGNAL_LABEL_FAILED}"
+  gh issue comment "${ISSUE_NUMBER}" -R "${REPO}" --body "$(cat <<EOF
+Agent run failed during \`${CURRENT_STAGE}\`.
+
+Exit code: ${exit_code}
+EOF
+)" >/dev/null 2>&1 || true
+
+  echo "=== Agent failed ==="
+  exit "${exit_code}"
+}
+
+trap on_exit EXIT
 
 # --- Auth gh CLI ---
-echo "${GITHUB_TOKEN}" | gh auth login --with-token
+export GH_TOKEN="${GITHUB_TOKEN}"
 git config --global user.name "github-agent[bot]"
 git config --global user.email "github-agent[bot]@users.noreply.github.com"
+set_signal_label "${SIGNAL_LABEL_RUNNING}"
 
 # --- Clone repo ---
+CURRENT_STAGE="clone repository"
 echo "Cloning ${REPO}..."
 gh repo clone "${REPO}" repo -- --depth=50
 cd repo
 
 # --- Fetch issue/PR context ---
+CURRENT_STAGE="fetch issue context"
 echo "Fetching context for #${ISSUE_NUMBER}..."
 if [ "${IS_PR}" = "true" ]; then
   CONTEXT=$(gh pr view "${ISSUE_NUMBER}" --json title,body,comments,labels,headRefName,baseRefName,files \
@@ -99,9 +152,11 @@ echo "=== Starting Claude Code ==="
 echo "Mission: Working on #${ISSUE_NUMBER} in ${REPO}"
 
 # --- Run Claude Code with OpenRouter ---
-# Claude Code uses ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY to connect to the provider
-export ANTHROPIC_BASE_URL="https://openrouter.ai/api/v1"
-export ANTHROPIC_API_KEY="${OPENROUTER_API_KEY}"
+# OpenRouter's Claude Code compatibility layer expects the base API path and auth token envs.
+CURRENT_STAGE="run agent"
+export ANTHROPIC_BASE_URL="https://openrouter.ai/api"
+export ANTHROPIC_AUTH_TOKEN="${OPENROUTER_API_KEY}"
+export ANTHROPIC_API_KEY=""
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 
 # Run in non-interactive mode with the mission prompt
@@ -110,9 +165,4 @@ claude --dangerously-skip-permissions \
   --model "anthropic/claude-sonnet-4" \
   --print \
   "${MISSION}"
-
-# --- Cleanup: remove the agent label so it can be re-triggered ---
-echo "Removing 'agent' label..."
-gh issue edit "${ISSUE_NUMBER}" --remove-label "agent" -R "${REPO}" 2>/dev/null || true
-
-echo "=== Agent finished ==="
+RUN_STATUS="succeeded"

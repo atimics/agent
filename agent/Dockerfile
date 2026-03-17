@@ -12,9 +12,15 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # Install Claude Code
 RUN npm install -g @anthropic-ai/claude-code
 
+RUN useradd --create-home --shell /bin/bash agent \
+  && mkdir -p /work \
+  && chown -R agent:agent /work /home/agent
+
 WORKDIR /work
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+USER agent
 
 ENTRYPOINT ["/entrypoint.sh"]

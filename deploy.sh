@@ -18,9 +18,9 @@ aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS 
 
 cd agent
 npm install
-docker build --platform linux/amd64 -t github-agent .
-docker tag github-agent:latest "$ECR_REPO:latest"
-docker push "$ECR_REPO:latest"
+docker build --platform linux/amd64 --load -t github-agent .
+docker tag github-agent:latest "${ECR_REPO}:latest"
+docker push "${ECR_REPO}:latest"
 cd ..
 
 echo ""

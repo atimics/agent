@@ -20,12 +20,144 @@ const SECURITY_GROUP = process.env.SECURITY_GROUP!;
 const WEBHOOK_SECRET_PARAM = process.env.WEBHOOK_SECRET_PARAM!;
 const GITHUB_TOKEN_PARAM = process.env.GITHUB_TOKEN_PARAM!;
 const OPENROUTER_API_KEY_PARAM = process.env.OPENROUTER_API_KEY_PARAM!;
+const TRIGGER_LABEL = "agent";
+const SIGNAL_LABEL_RUNNING = "agent:running";
+const SIGNAL_LABEL_FAILED = "agent:failed";
+const SIGNAL_LABEL_SUCCEEDED = "agent:succeeded";
+const SIGNAL_LABELS = [
+  {
+    name: SIGNAL_LABEL_RUNNING,
+    color: "1D76DB",
+    description: "Autonomous run is currently in progress",
+  },
+  {
+    name: SIGNAL_LABEL_FAILED,
+    color: "D73A4A",
+    description: "Autonomous run failed before finishing",
+  },
+  {
+    name: SIGNAL_LABEL_SUCCEEDED,
+    color: "0E8A16",
+    description: "Autonomous run finished successfully",
+  },
+] as const;
 
 async function getParameter(name: string): Promise<string> {
   const resp = await ssm.send(
     new GetParameterCommand({ Name: name, WithDecryption: true })
   );
   return resp.Parameter?.Value ?? "";
+}
+
+async function githubRequest(
+  path: string,
+  token: string,
+  init: RequestInit,
+  expectedStatuses: number[]
+): Promise<Response> {
+  const response = await fetch(`https://api.github.com${path}`, {
+    ...init,
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${token}`,
+      "User-Agent": "github-agent-control-plane",
+      ...(init.body ? { "Content-Type": "application/json" } : {}),
+      ...(init.headers ?? {}),
+    },
+  });
+
+  if (!expectedStatuses.includes(response.status)) {
+    const responseBody = await response.text();
+    throw new Error(
+      `GitHub API ${init.method ?? "GET"} ${path} failed with ${response.status}: ${responseBody}`
+    );
+  }
+
+  return response;
+}
+
+async function ensureSignalLabels(
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<void> {
+  for (const label of SIGNAL_LABELS) {
+    await githubRequest(
+      `/repos/${repoOwner}/${repoName}/labels`,
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify(label),
+      },
+      [201, 422]
+    );
+  }
+}
+
+async function deleteLabelIfPresent(
+  repoOwner: string,
+  repoName: string,
+  issueNumber: number,
+  token: string,
+  label: string
+): Promise<void> {
+  await githubRequest(
+    `/repos/${repoOwner}/${repoName}/issues/${issueNumber}/labels/${encodeURIComponent(label)}`,
+    token,
+    { method: "DELETE" },
+    [200, 204, 404]
+  );
+}
+
+async function setSignalLabel(
+  repoOwner: string,
+  repoName: string,
+  issueNumber: number,
+  token: string,
+  label: string
+): Promise<void> {
+  const labelsToRemove = [TRIGGER_LABEL, ...SIGNAL_LABELS.map((entry) => entry.name)]
+    .filter((candidate) => candidate !== label);
+
+  for (const candidate of labelsToRemove) {
+    await deleteLabelIfPresent(repoOwner, repoName, issueNumber, token, candidate);
+  }
+
+  await githubRequest(
+    `/repos/${repoOwner}/${repoName}/issues/${issueNumber}/labels`,
+    token,
+    {
+      method: "POST",
+      body: JSON.stringify({ labels: [label] }),
+    },
+    [200]
+  );
+}
+
+async function addIssueComment(
+  repoOwner: string,
+  repoName: string,
+  issueNumber: number,
+  token: string,
+  body: string
+): Promise<void> {
+  await githubRequest(
+    `/repos/${repoOwner}/${repoName}/issues/${issueNumber}/comments`,
+    token,
+    {
+      method: "POST",
+      body: JSON.stringify({ body }),
+    },
+    [201]
+  );
+}
+
+function formatLaunchFailure(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return "Unknown launch error";
 }
 
 function verifySignature(
@@ -88,7 +220,7 @@ export async function handler(event: {
   }
 
   const labelName = payload.label?.name?.toLowerCase();
-  if (labelName !== "agent") {
+  if (labelName !== TRIGGER_LABEL) {
     console.log(`Ignoring label: ${payload.label?.name}`);
     return { statusCode: 200, body: "Ignored: not the agent label" };
   }
@@ -123,43 +255,101 @@ export async function handler(event: {
     getParameter(OPENROUTER_API_KEY_PARAM),
   ]);
 
-  // --- Run Fargate task ---
-  const params: RunTaskCommandInput = {
-    cluster: CLUSTER_ARN,
-    taskDefinition: TASK_DEFINITION_ARN,
-    launchType: "FARGATE",
-    count: 1,
-    networkConfiguration: {
-      awsvpcConfiguration: {
-        subnets: SUBNETS.split(","),
-        securityGroups: [SECURITY_GROUP],
-        assignPublicIp: "ENABLED",
-      },
-    },
-    overrides: {
-      containerOverrides: [
-        {
-          name: CONTAINER_NAME,
-          environment: [
-            { name: "GITHUB_TOKEN", value: githubToken },
-            { name: "OPENROUTER_API_KEY", value: openrouterKey },
-            { name: "REPO_OWNER", value: repoOwner },
-            { name: "REPO_NAME", value: repoName },
-            { name: "ISSUE_NUMBER", value: String(issueNumber) },
-            { name: "IS_PR", value: String(isPR) },
-            { name: "ACTION", value: payload.action },
-          ],
+  await ensureSignalLabels(repoOwner, repoName, githubToken);
+  await setSignalLabel(
+    repoOwner,
+    repoName,
+    issueNumber,
+    githubToken,
+    SIGNAL_LABEL_RUNNING
+  );
+
+  try {
+    // --- Run Fargate task ---
+    const params: RunTaskCommandInput = {
+      cluster: CLUSTER_ARN,
+      taskDefinition: TASK_DEFINITION_ARN,
+      launchType: "FARGATE",
+      count: 1,
+      networkConfiguration: {
+        awsvpcConfiguration: {
+          subnets: SUBNETS.split(","),
+          securityGroups: [SECURITY_GROUP],
+          assignPublicIp: "ENABLED",
         },
-      ],
-    },
-  };
+      },
+      overrides: {
+        containerOverrides: [
+          {
+            name: CONTAINER_NAME,
+            environment: [
+              { name: "GITHUB_TOKEN", value: githubToken },
+              { name: "OPENROUTER_API_KEY", value: openrouterKey },
+              { name: "REPO_OWNER", value: repoOwner },
+              { name: "REPO_NAME", value: repoName },
+              { name: "ISSUE_NUMBER", value: String(issueNumber) },
+              { name: "IS_PR", value: String(isPR) },
+              { name: "ACTION", value: payload.action },
+              { name: "TRIGGER_LABEL", value: TRIGGER_LABEL },
+              { name: "SIGNAL_LABEL_RUNNING", value: SIGNAL_LABEL_RUNNING },
+              { name: "SIGNAL_LABEL_FAILED", value: SIGNAL_LABEL_FAILED },
+              { name: "SIGNAL_LABEL_SUCCEEDED", value: SIGNAL_LABEL_SUCCEEDED },
+            ],
+          },
+        ],
+      },
+    };
 
-  const result = await ecs.send(new RunTaskCommand(params));
-  const taskArn = result.tasks?.[0]?.taskArn ?? "unknown";
-  console.log(`Started Fargate task: ${taskArn}`);
+    const result = await ecs.send(new RunTaskCommand(params));
+    const taskArn = result.tasks?.[0]?.taskArn;
 
-  return {
-    statusCode: 200,
-    body: JSON.stringify({ message: "Agent launched", taskArn }),
-  };
+    if (!taskArn || (result.failures?.length ?? 0) > 0) {
+      const failureDetails =
+        result.failures?.map((failure) => failure.reason ?? failure.arn ?? "unknown failure") ??
+        [];
+      throw new Error(
+        failureDetails.length > 0
+          ? `ECS task launch failed: ${failureDetails.join(", ")}`
+          : "ECS task launch did not return a task ARN"
+      );
+    }
+
+    console.log(`Started Fargate task: ${taskArn}`);
+
+    return {
+      statusCode: 200,
+      body: JSON.stringify({ message: "Agent launched", taskArn }),
+    };
+  } catch (error) {
+    const failureMessage = formatLaunchFailure(error);
+    console.error(`Failed to launch agent task: ${failureMessage}`);
+
+    try {
+      await setSignalLabel(
+        repoOwner,
+        repoName,
+        issueNumber,
+        githubToken,
+        SIGNAL_LABEL_FAILED
+      );
+      await addIssueComment(
+        repoOwner,
+        repoName,
+        issueNumber,
+        githubToken,
+        [
+          "Agent failed before the runtime started.",
+          "",
+          `Launch error: ${failureMessage}`,
+        ].join("\n")
+      );
+    } catch (reportingError) {
+      console.error("Failed to report launch failure to GitHub", reportingError);
+    }
+
+    return {
+      statusCode: 200,
+      body: JSON.stringify({ message: "Agent launch failed" }),
+    };
+  }
 }
