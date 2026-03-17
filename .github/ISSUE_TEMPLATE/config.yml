@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 📚 Agent Workflow Documentation
+    url: https://github.com/atimics/agent/blob/main/README.md#agent-workflow
+    about: Learn how to use the automated agent system
+  - name: 🐛 Security Issues
+    url: https://github.com/atimics/agent/security
+    about: Report security vulnerabilities privately

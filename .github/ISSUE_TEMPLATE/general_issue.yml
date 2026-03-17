@@ -1,0 +1,95 @@
+name: 🔧 General Issue
+description: Report a bug, request a feature, or discuss improvements
+title: ""
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for general issues, bug reports, feature requests, or discussions that don't require the automated agent.
+
+        **💡 Tip:** If you want the agent to work on this issue, use the [Agent Task template](./agent_task.yml) instead, or add the `agent` label after creating this issue.
+
+  - type: dropdown
+    id: issue-type
+    attributes:
+      label: 🏷️ Issue Type
+      description: What type of issue is this?
+      options:
+        - "🐛 Bug Report"
+        - "✨ Feature Request"
+        - "❓ Question"
+        - "📝 Documentation"
+        - "💬 Discussion"
+        - "🔧 Enhancement"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 📝 Description
+      description: Provide a clear and concise description of the issue, feature, or question.
+      placeholder: |
+        **For bugs:** Describe what happened and what you expected to happen
+        **For features:** Describe the feature and why it would be useful
+        **For questions:** Ask your question with relevant context
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: 🔄 Steps to Reproduce (for bugs)
+      description: If this is a bug report, list the steps to reproduce the issue.
+      placeholder: |
+        1. Go to '...'
+        2. Click on '...'
+        3. Scroll down to '...'
+        4. See the error
+    validations:
+      required: false
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: ✅ Expected Behavior
+      description: What did you expect to happen?
+      placeholder: Describe what should happen instead
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 🖥️ Environment
+      description: Relevant environment information (browser, OS, version, etc.)
+      placeholder: |
+        - OS: [e.g., macOS 12.0]
+        - Browser: [e.g., Chrome 96]
+        - Node.js version: [e.g., 18.0.0]
+        - Package version: [e.g., 1.2.3]
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: 💬 Additional Context
+      description: Add any other context, screenshots, or examples that might be helpful.
+      placeholder: |
+        - Screenshots or error messages
+        - Links to related issues or discussions
+        - Code examples or gists
+        - Any other relevant information
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+
+        **🤖 Want the agent to work on this?**
+        - Add the `agent` label to this issue, or
+        - Use the [Agent Task template](./agent_task.yml) for more structured agent requests

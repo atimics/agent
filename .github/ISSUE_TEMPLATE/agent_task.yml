@@ -1,0 +1,137 @@
+name: 🤖 Agent Task
+description: Request the automated agent to perform a software engineering task
+title: "[Agent] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to request the automated agent to perform software engineering tasks like bug fixes, feature implementation, code review, or documentation updates.
+
+        **📋 Quick Reference:**
+        - Add the `agent` label after creating this issue to trigger the agent
+        - The agent will update labels to show progress: `agent:running` → `agent:succeeded`/`agent:failed`
+        - For help with this workflow, see the [README](../../../README.md#agent-workflow)
+
+  - type: textarea
+    id: problem-statement
+    attributes:
+      label: 🎯 Problem Statement
+      description: What needs to be accomplished? Describe the task clearly and concisely.
+      placeholder: |
+        Example: "Add a dark mode toggle to the application header that persists user preference"
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: ✅ Acceptance Criteria
+      description: How will we know this task is complete? List specific, testable requirements.
+      placeholder: |
+        - [ ] Toggle button appears in the application header
+        - [ ] Clicking toggle switches between light and dark themes
+        - [ ] User preference is saved to localStorage
+        - [ ] Theme applies to all components consistently
+        - [ ] Default theme matches system preference
+    validations:
+      required: true
+
+  - type: dropdown
+    id: task-size
+    attributes:
+      label: 📏 Task Size
+      description: How complex is this task?
+      options:
+        - "Small (single file, <50 lines changed)"
+        - "Medium (multiple files, ~50-200 lines)"
+        - "Large (cross-cutting changes, >200 lines)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: urgency
+    attributes:
+      label: ⏰ Urgency
+      description: How urgent is this task?
+      options:
+        - "Low (when convenient)"
+        - "Medium (within a few days)"
+        - "High (ASAP)"
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 📂 Context & File References
+      description: Provide relevant context, file paths, related issues, or existing code references.
+      placeholder: |
+        **Relevant files:**
+        - `src/components/Header.tsx` - main header component
+        - `src/hooks/useTheme.ts` - existing theme logic
+        - `src/styles/themes.css` - theme definitions
+
+        **Related issues/PRs:**
+        - #123 - initial theme system implementation
+
+        **Additional context:**
+        - We use CSS-in-JS with styled-components
+        - Theme tokens are defined in the design system
+    validations:
+      required: false
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: 🚧 Constraints & Requirements
+      description: Any technical constraints, coding standards, or special considerations?
+      placeholder: |
+        - Must maintain accessibility (WCAG AA compliance)
+        - Use TypeScript with strict mode
+        - Follow existing component patterns
+        - Include unit tests for new functionality
+        - No breaking changes to existing theme API
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: task-type
+    attributes:
+      label: 🏷️ Task Type
+      description: What type of work is this? (Select all that apply)
+      options:
+        - label: "🐛 Bug Fix"
+        - label: "✨ New Feature"
+        - label: "♻️ Refactoring"
+        - label: "📝 Documentation"
+        - label: "🧪 Testing"
+        - label: "⚡ Performance"
+        - label: "🎨 UI/UX"
+        - label: "🔧 Tooling/Infrastructure"
+
+  - type: textarea
+    id: additional-info
+    attributes:
+      label: 💬 Additional Information
+      description: Anything else that would help the agent understand and complete this task?
+      placeholder: |
+        - Edge cases to consider
+        - Design mockups or references
+        - Performance requirements
+        - Browser compatibility needs
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+
+        **🚀 Next Steps:**
+        1. Create this issue
+        2. Add the `agent` label to trigger the automated agent
+        3. Monitor the issue for agent progress and updates
+        4. The agent will post comments and create a PR when complete
+
+        **Need help?** Check the [Agent Workflow Documentation](../../../README.md#agent-workflow) or ask questions in the comments.
