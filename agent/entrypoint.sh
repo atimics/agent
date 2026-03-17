@@ -57,8 +57,38 @@ on_exit() {
   fi
 
   set_signal_label "${SIGNAL_LABEL_FAILED}"
+
+  # Prepare detailed error message based on the stage
+  local error_details=""
+  case "${CURRENT_STAGE}" in
+    "authenticate GitHub CLI")
+      error_details="
+
+**Authentication Issue**: The GitHub token provided to the agent is invalid or lacks sufficient permissions.
+
+Please check:
+- The \`GITHUB_TOKEN\` SSM parameter contains a valid GitHub Personal Access Token
+- The token has \`repo\` and \`read:org\` permissions
+- The token hasn't expired
+- The repository is accessible with this token"
+      ;;
+    "clone repository"|"fetch issue context")
+      error_details="
+
+**Repository Access Issue**: Unable to access repository \`${REPO}\` or issue/PR #${ISSUE_NUMBER}.
+
+Please check:
+- The repository exists and is accessible
+- The GitHub token has appropriate permissions
+- The issue/PR number is correct"
+      ;;
+    *)
+      error_details=""
+      ;;
+  esac
+
   gh issue comment "${ISSUE_NUMBER}" -R "${REPO}" --body "$(cat <<EOF
-Agent run failed during \`${CURRENT_STAGE}\`.
+Agent run failed during \`${CURRENT_STAGE}\`.${error_details}
 
 Exit code: ${exit_code}
 EOF
@@ -103,9 +133,50 @@ has_agent_question_comment() {
 }
 
 # --- Auth gh CLI ---
+CURRENT_STAGE="authenticate GitHub CLI"
+echo "Setting up GitHub CLI authentication..."
+
+# Clear any existing gh auth state to avoid conflicts
+gh auth logout --hostname github.com >/dev/null 2>&1 || true
+
+# Use environment-based auth (preferred for headless environments)
 export GH_TOKEN="${GITHUB_TOKEN}"
+
+# Validate authentication early
+echo "Validating GitHub CLI authentication..."
+if ! gh auth status >/dev/null 2>&1; then
+  echo "ERROR: GitHub CLI authentication failed"
+  echo "GitHub CLI auth status:"
+  gh auth status 2>&1 || true
+  echo ""
+  echo "This usually means:"
+  echo "1. The GITHUB_TOKEN is invalid or expired"
+  echo "2. The token doesn't have sufficient permissions"
+  echo "3. GitHub API is unavailable"
+  exit 1
+fi
+
+# Test basic GitHub API access
+echo "Testing GitHub API access..."
+if ! gh api user >/dev/null 2>&1; then
+  echo "ERROR: Cannot access GitHub API with provided token"
+  echo "Token may be invalid or lack required permissions (repo, read:org)"
+  exit 1
+fi
+
+# Test repository access specifically
+echo "Testing repository access for ${REPO}..."
+if ! gh repo view "${REPO}" >/dev/null 2>&1; then
+  echo "ERROR: Cannot access repository ${REPO}"
+  echo "Token may lack access to this specific repository"
+  exit 1
+fi
+
+# Configure git identity for commits
 git config --global user.name "github-agent[bot]"
 git config --global user.email "github-agent[bot]@users.noreply.github.com"
+
+echo "GitHub CLI authentication successful"
 set_signal_label "${SIGNAL_LABEL_RUNNING}"
 
 # --- Clone repo ---
