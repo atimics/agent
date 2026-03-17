@@ -10,14 +10,17 @@ set -Eeuo pipefail
 : "${IS_PR:=false}"
 : "${TRIGGER_LABEL:=agent}"
 : "${SIGNAL_LABEL_RUNNING:=agent:running}"
+: "${SIGNAL_LABEL_WAITING:=agent:waiting}"
 : "${SIGNAL_LABEL_FAILED:=agent:failed}"
 : "${SIGNAL_LABEL_SUCCEEDED:=agent:succeeded}"
 
 REPO="${REPO_OWNER}/${REPO_NAME}"
 CURRENT_STAGE="startup"
 RUN_STATUS="failed"
+RUN_STARTED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 SIGNAL_LABELS=(
   "${SIGNAL_LABEL_RUNNING}"
+  "${SIGNAL_LABEL_WAITING}"
   "${SIGNAL_LABEL_FAILED}"
   "${SIGNAL_LABEL_SUCCEEDED}"
 )
@@ -41,6 +44,12 @@ on_exit() {
 
   set +e
 
+  if [ "${RUN_STATUS}" = "waiting" ] && [ "${exit_code}" -eq 0 ]; then
+    set_signal_label "${SIGNAL_LABEL_WAITING}"
+    echo "=== Agent waiting for confirmation ==="
+    exit 0
+  fi
+
   if [ "${RUN_STATUS}" = "succeeded" ] && [ "${exit_code}" -eq 0 ]; then
     set_signal_label "${SIGNAL_LABEL_SUCCEEDED}"
     echo "=== Agent finished ==="
@@ -60,6 +69,38 @@ EOF
 }
 
 trap on_exit EXIT
+
+find_created_pr_url() {
+  gh api "repos/${REPO}/issues/${ISSUE_NUMBER}/timeline?per_page=100" \
+    -H "Accept: application/vnd.github+json" \
+    | jq -r --arg since "${RUN_STARTED_AT}" '
+      map(
+        select(
+          .event == "cross-referenced"
+          and .created_at >= $since
+          and .source.issue.pull_request.html_url != null
+        )
+      )
+      | last
+      | .source.issue.html_url // empty
+    '
+}
+
+has_agent_question_comment() {
+  local comments_json
+
+  comments_json="$(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}/comments?per_page=100")"
+
+  jq -e --arg since "${RUN_STARTED_AT}" '
+    map(
+      select(
+        .created_at >= $since
+        and (.body | test("\\?"))
+      )
+    )
+    | length > 0
+  ' >/dev/null <<<"${comments_json}"
+}
 
 # --- Auth gh CLI ---
 export GH_TOKEN="${GITHUB_TOKEN}"
@@ -165,4 +206,15 @@ claude --dangerously-skip-permissions \
   --model "anthropic/claude-sonnet-4" \
   --print \
   "${MISSION}"
-RUN_STATUS="succeeded"
+
+CURRENT_STAGE="verify outputs"
+if [ "${IS_PR}" = "true" ]; then
+  RUN_STATUS="succeeded"
+elif PR_URL="$(find_created_pr_url)" && [ -n "${PR_URL}" ]; then
+  RUN_STATUS="succeeded"
+elif has_agent_question_comment; then
+  RUN_STATUS="waiting"
+else
+  echo "Agent exited successfully but no PR was created for issue #${ISSUE_NUMBER}" >&2
+  exit 1
+fi

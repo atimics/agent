@@ -22,6 +22,7 @@ const GITHUB_TOKEN_PARAM = process.env.GITHUB_TOKEN_PARAM!;
 const OPENROUTER_API_KEY_PARAM = process.env.OPENROUTER_API_KEY_PARAM!;
 const TRIGGER_LABEL = "agent";
 const SIGNAL_LABEL_RUNNING = "agent:running";
+const SIGNAL_LABEL_WAITING = "agent:waiting";
 const SIGNAL_LABEL_FAILED = "agent:failed";
 const SIGNAL_LABEL_SUCCEEDED = "agent:succeeded";
 const SIGNAL_LABELS = [
@@ -29,6 +30,11 @@ const SIGNAL_LABELS = [
     name: SIGNAL_LABEL_RUNNING,
     color: "1D76DB",
     description: "Autonomous run is currently in progress",
+  },
+  {
+    name: SIGNAL_LABEL_WAITING,
+    color: "FBCA04",
+    description: "Autonomous run is waiting for confirmation or clarification",
   },
   {
     name: SIGNAL_LABEL_FAILED,
@@ -160,6 +166,10 @@ function formatLaunchFailure(error: unknown): string {
   return "Unknown launch error";
 }
 
+function isResumeConfirmation(body: string): boolean {
+  return /(^|\n)\s*\/agent\s+(continue|resume)\b/i.test(body);
+}
+
 function verifySignature(
   payload: string,
   signature: string,
@@ -213,36 +223,55 @@ export async function handler(event: {
 
   console.log(`GitHub event: ${ghEvent}, action: ${payload.action}`);
 
-  // --- Filter: only labeled events with label "agent" ---
-  if (payload.action !== "labeled") {
-    console.log("Ignoring non-labeled action");
-    return { statusCode: 200, body: "Ignored: not a labeled action" };
-  }
-
-  const labelName = payload.label?.name?.toLowerCase();
-  if (labelName !== TRIGGER_LABEL) {
-    console.log(`Ignoring label: ${payload.label?.name}`);
-    return { statusCode: 200, body: "Ignored: not the agent label" };
-  }
-
   let repoOwner: string;
   let repoName: string;
   let issueNumber: number;
   let isPR = false;
 
-  if (ghEvent === "issues") {
+  if (ghEvent === "issues" && payload.action === "labeled") {
+    const labelName = payload.label?.name?.toLowerCase();
+    if (labelName !== TRIGGER_LABEL) {
+      console.log(`Ignoring label: ${payload.label?.name}`);
+      return { statusCode: 200, body: "Ignored: not the agent label" };
+    }
+
     repoOwner = payload.repository.owner.login;
     repoName = payload.repository.name;
     issueNumber = payload.issue.number;
     isPR = false;
-  } else if (ghEvent === "pull_request") {
+  } else if (ghEvent === "pull_request" && payload.action === "labeled") {
+    const labelName = payload.label?.name?.toLowerCase();
+    if (labelName !== TRIGGER_LABEL) {
+      console.log(`Ignoring label: ${payload.label?.name}`);
+      return { statusCode: 200, body: "Ignored: not the agent label" };
+    }
+
     repoOwner = payload.repository.owner.login;
     repoName = payload.repository.name;
     issueNumber = payload.pull_request.number;
     isPR = true;
+  } else if (ghEvent === "issue_comment" && payload.action === "created") {
+    const issueLabels =
+      payload.issue?.labels?.map((label: { name?: string }) => label.name?.toLowerCase()) ?? [];
+    const isWaiting = issueLabels.includes(SIGNAL_LABEL_WAITING);
+    if (!isWaiting) {
+      console.log("Ignoring issue comment because the issue is not waiting");
+      return { statusCode: 200, body: "Ignored: issue not in waiting state" };
+    }
+
+    const commentBody = payload.comment?.body ?? "";
+    if (!isResumeConfirmation(commentBody)) {
+      console.log("Ignoring issue comment because it is not a resume confirmation");
+      return { statusCode: 200, body: "Ignored: not a resume confirmation" };
+    }
+
+    repoOwner = payload.repository.owner.login;
+    repoName = payload.repository.name;
+    issueNumber = payload.issue.number;
+    isPR = Boolean(payload.issue.pull_request);
   } else {
-    console.log(`Ignoring event type: ${ghEvent}`);
-    return { statusCode: 200, body: `Ignored: event type ${ghEvent}` };
+    console.log(`Ignoring event: ${ghEvent}/${payload.action}`);
+    return { statusCode: 200, body: `Ignored: ${ghEvent}/${payload.action}` };
   }
 
   console.log(
@@ -292,6 +321,7 @@ export async function handler(event: {
               { name: "ACTION", value: payload.action },
               { name: "TRIGGER_LABEL", value: TRIGGER_LABEL },
               { name: "SIGNAL_LABEL_RUNNING", value: SIGNAL_LABEL_RUNNING },
+              { name: "SIGNAL_LABEL_WAITING", value: SIGNAL_LABEL_WAITING },
               { name: "SIGNAL_LABEL_FAILED", value: SIGNAL_LABEL_FAILED },
               { name: "SIGNAL_LABEL_SUCCEEDED", value: SIGNAL_LABEL_SUCCEEDED },
             ],
