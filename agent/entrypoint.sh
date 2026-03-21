@@ -182,35 +182,17 @@ gh auth logout --hostname github.com >/dev/null 2>&1 || true
 # Use environment-based auth (preferred for headless environments)
 export GH_TOKEN="${GITHUB_TOKEN}"
 
-# Validate authentication early
-echo "Validating GitHub CLI authentication..."
-if ! gh auth status >/dev/null 2>&1; then
-  echo "ERROR: GitHub CLI authentication failed"
-  echo "GitHub CLI auth status:"
-  gh auth status 2>&1 || true
-  echo ""
-  echo "This usually means:"
-  echo "1. The GitHub App installation token is invalid or expired"
-  echo "2. The GitHub App doesn't have sufficient permissions"
-  echo "3. GitHub API is unavailable"
-  exit 1
-fi
-
-# Test basic GitHub API access
-echo "Testing GitHub API access..."
-if ! gh api user >/dev/null 2>&1; then
-  echo "ERROR: Cannot access GitHub API with provided token"
-  echo "GitHub App installation token may be invalid or lack required permissions"
-  exit 1
-fi
-
-# Test repository access specifically
-echo "Testing repository access for ${REPO}..."
-if ! gh repo view "${REPO}" >/dev/null 2>&1; then
+# Validate authentication by testing repository access directly
+# Note: gh auth status and gh api user don't work with GitHub App installation tokens
+echo "Validating GitHub App installation token..."
+if ! gh repo view "${REPO}" --json nameWithOwner >/dev/null 2>&1; then
   echo "ERROR: Cannot access repository ${REPO}"
   echo "GitHub App installation may not have access to this repository"
+  echo "Token test: gh api repos/${REPO} response:"
+  gh api "repos/${REPO}" 2>&1 | head -5 || true
   exit 1
 fi
+echo "Repository access confirmed for ${REPO}"
 
 # Configure git identity for commits
 git config --global user.name "github-agent[bot]"
