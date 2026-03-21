@@ -91,13 +91,13 @@ on_exit() {
     "authenticate GitHub CLI")
       error_details="
 
-**Authentication Issue**: The GitHub token provided to the agent is invalid or lacks sufficient permissions.
+**Authentication Issue**: The GitHub App installation token is invalid or lacks sufficient permissions.
 
 Please check:
-- The \`GITHUB_TOKEN\` SSM parameter contains a valid GitHub Personal Access Token
-- The token has \`repo\` and \`read:org\` permissions
-- The token hasn't expired
-- The repository is accessible with this token"
+- The GitHub App is installed on the target repository
+- The GitHub App has the required permissions (contents, pull requests, issues)
+- The \`GITHUB_APP_ID\` and \`GITHUB_APP_PRIVATE_KEY\` SSM parameters are correct
+- The repository is accessible with the GitHub App installation"
       ;;
     "clone repository"|"fetch issue context")
       error_details="
@@ -190,8 +190,8 @@ if ! gh auth status >/dev/null 2>&1; then
   gh auth status 2>&1 || true
   echo ""
   echo "This usually means:"
-  echo "1. The GITHUB_TOKEN is invalid or expired"
-  echo "2. The token doesn't have sufficient permissions"
+  echo "1. The GitHub App installation token is invalid or expired"
+  echo "2. The GitHub App doesn't have sufficient permissions"
   echo "3. GitHub API is unavailable"
   exit 1
 fi
@@ -200,7 +200,7 @@ fi
 echo "Testing GitHub API access..."
 if ! gh api user >/dev/null 2>&1; then
   echo "ERROR: Cannot access GitHub API with provided token"
-  echo "Token may be invalid or lack required permissions (repo, read:org)"
+  echo "GitHub App installation token may be invalid or lack required permissions"
   exit 1
 fi
 
@@ -208,7 +208,7 @@ fi
 echo "Testing repository access for ${REPO}..."
 if ! gh repo view "${REPO}" >/dev/null 2>&1; then
   echo "ERROR: Cannot access repository ${REPO}"
-  echo "Token may lack access to this specific repository"
+  echo "GitHub App installation may not have access to this repository"
   exit 1
 fi
 

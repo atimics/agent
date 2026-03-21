@@ -13,7 +13,9 @@ import {
   IssueMetadata,
   generateTaskId,
   createRepoSlug,
+  getInstallationToken,
   type TaskEnvironment,
+  type GitHubAppConfig,
 } from "./types";
 
 const ecs = new ECSClient({});
@@ -25,7 +27,8 @@ const CONTAINER_NAME = process.env.CONTAINER_NAME!;
 const SUBNETS = process.env.SUBNETS!;
 const SECURITY_GROUP = process.env.SECURITY_GROUP!;
 const WEBHOOK_SECRET_PARAM = process.env.WEBHOOK_SECRET_PARAM!;
-const GITHUB_TOKEN_PARAM = process.env.GITHUB_TOKEN_PARAM!;
+const GITHUB_APP_ID_PARAM = process.env.GITHUB_APP_ID_PARAM!;
+const GITHUB_APP_PRIVATE_KEY_PARAM = process.env.GITHUB_APP_PRIVATE_KEY_PARAM!;
 const OPENROUTER_API_KEY_PARAM = process.env.OPENROUTER_API_KEY_PARAM!;
 const TRIGGER_LABEL = "agent";
 const SIGNAL_LABEL_RUNNING = "agent:running";
@@ -319,11 +322,25 @@ export async function handler(event: {
     `Launching agent for ${repoOwner}/${repoName}#${issueNumber} (PR=${isPR})`
   );
 
-  // --- Fetch secrets for Fargate env overrides ---
-  const [githubToken, openrouterKey] = await Promise.all([
-    getParameter(GITHUB_TOKEN_PARAM),
+  // --- Fetch GitHub App credentials and mint installation token ---
+  const [appId, privateKey, openrouterKey] = await Promise.all([
+    getParameter(GITHUB_APP_ID_PARAM),
+    getParameter(GITHUB_APP_PRIVATE_KEY_PARAM),
     getParameter(OPENROUTER_API_KEY_PARAM),
   ]);
+
+  const appConfig: GitHubAppConfig = {
+    appId,
+    privateKey,
+  };
+
+  let githubToken: string;
+  try {
+    githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
+  } catch (error) {
+    console.error(`Failed to get installation token for ${repoOwner}/${repoName}:`, error);
+    throw new Error(`Failed to mint GitHub App installation token: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
 
   await ensureSignalLabels(repoOwner, repoName, githubToken);
   await setSignalLabel(
