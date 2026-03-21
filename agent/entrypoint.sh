@@ -4,17 +4,40 @@ set -Eeuo pipefail
 # --- Required env vars (passed by Lambda via Fargate overrides) ---
 : "${GITHUB_TOKEN:?Missing GITHUB_TOKEN}"
 : "${OPENROUTER_API_KEY:?Missing OPENROUTER_API_KEY}"
-: "${REPO_OWNER:?Missing REPO_OWNER}"
-: "${REPO_NAME:?Missing REPO_NAME}"
-: "${ISSUE_NUMBER:?Missing ISSUE_NUMBER}"
-: "${IS_PR:=false}"
+: "${TASK_PAYLOAD:?Missing TASK_PAYLOAD}"
 : "${TRIGGER_LABEL:=agent}"
 : "${SIGNAL_LABEL_RUNNING:=agent:running}"
 : "${SIGNAL_LABEL_WAITING:=agent:waiting}"
 : "${SIGNAL_LABEL_FAILED:=agent:failed}"
 : "${SIGNAL_LABEL_SUCCEEDED:=agent:succeeded}"
 
-REPO="${REPO_OWNER}/${REPO_NAME}"
+# --- Parse task payload ---
+echo "Parsing task payload..."
+TASK_ID=$(echo "$TASK_PAYLOAD" | jq -r '.task_id')
+REPO_SLUG=$(echo "$TASK_PAYLOAD" | jq -r '.repo_slug')
+REQUESTED_REF=$(echo "$TASK_PAYLOAD" | jq -r '.requested_ref')
+RESOLVED_COMMIT_SHA=$(echo "$TASK_PAYLOAD" | jq -r '.resolved_commit_sha')
+ISSUE_NUMBER=$(echo "$TASK_PAYLOAD" | jq -r '.issue_metadata.number')
+TASK_MODE=$(echo "$TASK_PAYLOAD" | jq -r '.task_mode')
+CREATED_AT=$(echo "$TASK_PAYLOAD" | jq -r '.created_at')
+
+# Extract repo owner and name from slug
+REPO_OWNER=$(echo "$REPO_SLUG" | cut -d'/' -f1)
+REPO_NAME=$(echo "$REPO_SLUG" | cut -d'/' -f2)
+REPO="${REPO_SLUG}"
+
+# Determine if this is a PR based on task mode
+IS_PR="false"
+if [ "$TASK_MODE" = "pull_request" ]; then
+  IS_PR="true"
+fi
+
+echo "Task ID: $TASK_ID"
+echo "Repository: $REPO_SLUG"
+echo "Requested ref: $REQUESTED_REF"
+echo "Resolved commit SHA: $RESOLVED_COMMIT_SHA"
+echo "Issue/PR #$ISSUE_NUMBER (mode: $TASK_MODE)"
+echo "Created at: $CREATED_AT"
 CURRENT_STAGE="startup"
 RUN_STATUS="failed"
 RUN_STARTED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -54,6 +77,9 @@ on_exit() {
   if [ "${RUN_STATUS}" = "succeeded" ] && [ "${exit_code}" -eq 0 ]; then
     set_signal_label "${SIGNAL_LABEL_SUCCEEDED}"
     echo "=== Agent finished ==="
+    echo "Task ID: ${TASK_ID}"
+    echo "Commit SHA: ${RESOLVED_COMMIT_SHA}"
+    echo "Completed at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     exit 0
   fi
 
@@ -199,6 +225,25 @@ echo "Cloning ${REPO}..."
 gh repo clone "${REPO}" repo -- --depth=50
 cd repo
 
+# --- Checkout resolved commit SHA ---
+echo "Checking out resolved commit SHA: $RESOLVED_COMMIT_SHA"
+if ! git checkout "$RESOLVED_COMMIT_SHA"; then
+  echo "ERROR: Failed to checkout commit SHA $RESOLVED_COMMIT_SHA"
+  echo "This commit may not exist or may not be accessible"
+  exit 1
+fi
+
+# Verify we're on the correct commit
+CURRENT_SHA=$(git rev-parse HEAD)
+if [ "$CURRENT_SHA" != "$RESOLVED_COMMIT_SHA" ]; then
+  echo "ERROR: Checkout verification failed"
+  echo "Expected SHA: $RESOLVED_COMMIT_SHA"
+  echo "Current SHA:  $CURRENT_SHA"
+  exit 1
+fi
+
+echo "Successfully checked out commit $RESOLVED_COMMIT_SHA"
+
 # --- Fetch issue/PR context ---
 CURRENT_STAGE="fetch issue context"
 echo "Fetching context for #${ISSUE_NUMBER}..."
@@ -259,14 +304,13 @@ ${CONTEXT}
 
 Your mission:
 - Review the PR diff and understand the changes
-- If improvements are needed, make the changes directly (you're on the PR branch already)
+- If improvements are needed, make the changes directly
 - Commit and push any changes you make
 - Post a comment on the PR summarizing what you did using: gh issue comment ${ISSUE_NUMBER} --body '<your comment>'
 - If you need clarification from the author, post a comment asking for it and stop
-- Be concise. Make minimal, focused changes."
+- Be concise. Make minimal, focused changes.
 
-  # Check out the PR branch
-  gh pr checkout "${ISSUE_NUMBER}"
+Note: You are working on commit SHA ${RESOLVED_COMMIT_SHA} which was the head of the PR when this task was created."
 else
   MISSION="You have been triggered by the 'agent' label on issue #${ISSUE_NUMBER} in ${REPO}.
 
@@ -297,7 +341,10 @@ while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
   ATTEMPT=$((ATTEMPT + 1))
   CURRENT_STAGE="run agent (attempt ${ATTEMPT}/${MAX_ATTEMPTS})"
   echo "=== Starting Claude Code (attempt ${ATTEMPT}/${MAX_ATTEMPTS}) ==="
+  echo "Task ID: ${TASK_ID}"
   echo "Mission: Working on #${ISSUE_NUMBER} in ${REPO}"
+  echo "Commit SHA: ${RESOLVED_COMMIT_SHA}"
+  echo "Requested ref: ${REQUESTED_REF}"
 
   # Run in non-interactive mode with the mission prompt
   # --dangerously-skip-permissions skips tool approval (we're in an isolated container)
