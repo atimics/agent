@@ -18,6 +18,7 @@ REPO="${REPO_OWNER}/${REPO_NAME}"
 CURRENT_STAGE="startup"
 RUN_STATUS="failed"
 RUN_STARTED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+AGENT_LOG="/tmp/agent-output.log"
 SIGNAL_LABELS=(
   "${SIGNAL_LABEL_RUNNING}"
   "${SIGNAL_LABEL_WAITING}"
@@ -87,8 +88,21 @@ Please check:
       ;;
   esac
 
+  # Include last 50 lines of agent output if available
+  local log_tail=""
+  if [ -f "${AGENT_LOG}" ] && [ -s "${AGENT_LOG}" ]; then
+    log_tail="
+
+<details><summary>Agent output (last 50 lines)</summary>
+
+\`\`\`
+$(tail -50 "${AGENT_LOG}")
+\`\`\`
+</details>"
+  fi
+
   gh issue comment "${ISSUE_NUMBER}" -R "${REPO}" --body "$(cat <<EOF
-Agent run failed during \`${CURRENT_STAGE}\`.${error_details}
+Agent run failed during \`${CURRENT_STAGE}\`.${error_details}${log_tail}
 
 Exit code: ${exit_code}
 EOF
@@ -189,7 +203,7 @@ cd repo
 CURRENT_STAGE="fetch issue context"
 echo "Fetching context for #${ISSUE_NUMBER}..."
 if [ "${IS_PR}" = "true" ]; then
-  CONTEXT=$(gh pr view "${ISSUE_NUMBER}" --json number,title,body,comments,labels,headRefName,baseRefName,files \
+  if ! CONTEXT=$(gh pr view "${ISSUE_NUMBER}" -R "${REPO}" --json number,title,body,comments,labels,headRefName,baseRefName,files \
     --template '## PR #{{.number}}: {{.title}}
 Base: {{.baseRefName}} <- Head: {{.headRefName}}
 Labels: {{range .labels}}{{.name}}, {{end}}
@@ -205,16 +219,20 @@ Labels: {{range .labels}}{{.name}}, {{end}}
 {{range .comments}}**{{.author.login}}** ({{.createdAt}}):
 {{.body}}
 
-{{end}}')
+{{end}}' 2>"${AGENT_LOG}"); then
+    echo "ERROR: gh pr view failed:" >&2
+    cat "${AGENT_LOG}" >&2
+    exit 1
+  fi
 
   # Also get the diff
-  DIFF=$(gh pr diff "${ISSUE_NUMBER}" 2>/dev/null | head -c 20000 || echo "(diff too large or unavailable)")
+  DIFF=$(gh pr diff "${ISSUE_NUMBER}" -R "${REPO}" 2>/dev/null | head -c 20000 || echo "(diff too large or unavailable)")
   CONTEXT="${CONTEXT}
 
 ### Diff
 ${DIFF}"
 else
-  CONTEXT=$(gh issue view "${ISSUE_NUMBER}" --json number,title,body,comments,labels \
+  if ! CONTEXT=$(gh issue view "${ISSUE_NUMBER}" -R "${REPO}" --json number,title,body,comments,labels \
     --template '## Issue #{{.number}}: {{.title}}
 Labels: {{range .labels}}{{.name}}, {{end}}
 
@@ -225,7 +243,11 @@ Labels: {{range .labels}}{{.name}}, {{end}}
 {{range .comments}}**{{.author.login}}** ({{.createdAt}}):
 {{.body}}
 
-{{end}}')
+{{end}}' 2>"${AGENT_LOG}"); then
+    echo "ERROR: gh issue view failed:" >&2
+    cat "${AGENT_LOG}" >&2
+    exit 1
+  fi
 fi
 
 # --- Build the mission prompt ---
@@ -279,10 +301,13 @@ while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
 
   # Run in non-interactive mode with the mission prompt
   # --dangerously-skip-permissions skips tool approval (we're in an isolated container)
+  # Capture output for debugging failed runs
   claude --dangerously-skip-permissions \
     --model "anthropic/claude-sonnet-4" \
     --print \
-    "${MISSION}" || true
+    "${MISSION}" 2>&1 | tee "${AGENT_LOG}" || true
+
+  echo "--- Claude Code exit status: ${PIPESTATUS[0]} ---" | tee -a "${AGENT_LOG}"
 
   # --- Verify outputs ---
   CURRENT_STAGE="verify outputs"
