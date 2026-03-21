@@ -189,7 +189,7 @@ cd repo
 CURRENT_STAGE="fetch issue context"
 echo "Fetching context for #${ISSUE_NUMBER}..."
 if [ "${IS_PR}" = "true" ]; then
-  CONTEXT=$(gh pr view "${ISSUE_NUMBER}" --json title,body,comments,labels,headRefName,baseRefName,files \
+  CONTEXT=$(gh pr view "${ISSUE_NUMBER}" --json number,title,body,comments,labels,headRefName,baseRefName,files \
     --template '## PR #{{.number}}: {{.title}}
 Base: {{.baseRefName}} <- Head: {{.headRefName}}
 Labels: {{range .labels}}{{.name}}, {{end}}
@@ -214,7 +214,7 @@ Labels: {{range .labels}}{{.name}}, {{end}}
 ### Diff
 ${DIFF}"
 else
-  CONTEXT=$(gh issue view "${ISSUE_NUMBER}" --json title,body,comments,labels \
+  CONTEXT=$(gh issue view "${ISSUE_NUMBER}" --json number,title,body,comments,labels \
     --template '## Issue #{{.number}}: {{.title}}
 Labels: {{range .labels}}{{.name}}, {{end}}
 
@@ -260,32 +260,46 @@ Your mission:
 - Be concise. Make minimal, focused changes. Don't refactor unrelated code."
 fi
 
-echo "=== Starting Claude Code ==="
-echo "Mission: Working on #${ISSUE_NUMBER} in ${REPO}"
-
 # --- Run Claude Code with OpenRouter ---
 # OpenRouter's Claude Code compatibility layer expects the base API path and auth token envs.
-CURRENT_STAGE="run agent"
 export ANTHROPIC_BASE_URL="https://openrouter.ai/api"
 export ANTHROPIC_AUTH_TOKEN="${OPENROUTER_API_KEY}"
 export ANTHROPIC_API_KEY=""
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 
-# Run in non-interactive mode with the mission prompt
-# --dangerously-skip-permissions skips tool approval (we're in an isolated container)
-claude --dangerously-skip-permissions \
-  --model "anthropic/claude-sonnet-4" \
-  --print \
-  "${MISSION}"
+MAX_ATTEMPTS=2
+ATTEMPT=0
+RUN_STATUS=""
 
-CURRENT_STAGE="verify outputs"
-if [ "${IS_PR}" = "true" ]; then
-  RUN_STATUS="succeeded"
-elif PR_URL="$(find_created_pr_url)" && [ -n "${PR_URL}" ]; then
-  RUN_STATUS="succeeded"
-elif has_agent_question_comment; then
-  RUN_STATUS="waiting"
-else
-  echo "Agent exited successfully but no PR was created for issue #${ISSUE_NUMBER}" >&2
-  exit 1
-fi
+while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
+  ATTEMPT=$((ATTEMPT + 1))
+  CURRENT_STAGE="run agent (attempt ${ATTEMPT}/${MAX_ATTEMPTS})"
+  echo "=== Starting Claude Code (attempt ${ATTEMPT}/${MAX_ATTEMPTS}) ==="
+  echo "Mission: Working on #${ISSUE_NUMBER} in ${REPO}"
+
+  # Run in non-interactive mode with the mission prompt
+  # --dangerously-skip-permissions skips tool approval (we're in an isolated container)
+  claude --dangerously-skip-permissions \
+    --model "anthropic/claude-sonnet-4" \
+    --print \
+    "${MISSION}" || true
+
+  # --- Verify outputs ---
+  CURRENT_STAGE="verify outputs"
+
+  # Give GitHub a moment to index cross-references
+  sleep 5
+
+  if [ "${IS_PR}" = "true" ]; then
+    RUN_STATUS="succeeded"
+  elif PR_URL="$(find_created_pr_url)" && [ -n "${PR_URL}" ]; then
+    RUN_STATUS="succeeded"
+  elif has_agent_question_comment; then
+    RUN_STATUS="waiting"
+  elif [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; then
+    echo "Attempt ${ATTEMPT}: no PR created and no questions asked — retrying..." >&2
+  else
+    echo "Agent exited successfully but no PR was created for issue #${ISSUE_NUMBER} after ${MAX_ATTEMPTS} attempts" >&2
+    exit 1
+  fi
+done
