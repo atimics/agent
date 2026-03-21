@@ -1,0 +1,26 @@
+name: General Issue
+description: Bug reports, feature requests, or general questions
+title: ''
+labels: []
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Describe the issue or request
+      placeholder: What's happening? What would you like to see changed?
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: Any other information that would be helpful
+      placeholder: |
+        - Screenshots
+        - Error messages
+        - Related issues
+        - Environment details
+    validations:
+      required: false
