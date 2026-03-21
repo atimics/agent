@@ -8,6 +8,13 @@ import {
   SSMClient,
   GetParameterCommand,
 } from "@aws-sdk/client-ssm";
+import {
+  TaskPayload,
+  IssueMetadata,
+  generateTaskId,
+  createRepoSlug,
+  type TaskEnvironment,
+} from "./types";
 
 const ecs = new ECSClient({});
 const ssm = new SSMClient({});
@@ -183,6 +190,56 @@ function verifySignature(
   return mismatch === 0;
 }
 
+/**
+ * Resolves a reference (branch, tag, or pull request) to an immutable commit SHA
+ */
+async function resolveCommitSha(
+  repoOwner: string,
+  repoName: string,
+  ref: string,
+  isPR: boolean,
+  issueNumber: number,
+  token: string
+): Promise<string> {
+  try {
+    if (isPR) {
+      // For PRs, get the head commit SHA
+      const response = await githubRequest(
+        `/repos/${repoOwner}/${repoName}/pulls/${issueNumber}`,
+        token,
+        { method: "GET" },
+        [200]
+      );
+      const prData = await response.json() as any;
+      return prData.head.sha;
+    } else {
+      // For issues, resolve the default branch HEAD
+      // First get the default branch
+      const repoResponse = await githubRequest(
+        `/repos/${repoOwner}/${repoName}`,
+        token,
+        { method: "GET" },
+        [200]
+      );
+      const repoData = await repoResponse.json() as any;
+      const defaultBranch = repoData.default_branch;
+
+      // Then get the HEAD commit SHA of the default branch
+      const branchResponse = await githubRequest(
+        `/repos/${repoOwner}/${repoName}/branches/${defaultBranch}`,
+        token,
+        { method: "GET" },
+        [200]
+      );
+      const branchData = await branchResponse.json() as any;
+      return branchData.commit.sha;
+    }
+  } catch (error) {
+    console.error(`Failed to resolve commit SHA for ${ref}:`, error);
+    throw new Error(`Failed to resolve commit SHA for ${ref}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
+
 export async function handler(event: {
   headers: Record<string, string | undefined>;
   body?: string;
@@ -223,6 +280,9 @@ export async function handler(event: {
   let repoName: string;
   let issueNumber: number;
   let isPR = false;
+  let requestedRef: string;
+  let issueData: any;
+  let prData: any;
 
   if (ghEvent === "issues" && payload.action === "labeled") {
     const labelName = payload.label?.name?.toLowerCase();
@@ -235,6 +295,8 @@ export async function handler(event: {
     repoName = payload.repository.name;
     issueNumber = payload.issue.number;
     isPR = false;
+    requestedRef = payload.repository.default_branch || "main";
+    issueData = payload.issue;
   } else if (ghEvent === "pull_request" && payload.action === "labeled") {
     const labelName = payload.label?.name?.toLowerCase();
     if (labelName !== TRIGGER_LABEL) {
@@ -246,6 +308,8 @@ export async function handler(event: {
     repoName = payload.repository.name;
     issueNumber = payload.pull_request.number;
     isPR = true;
+    requestedRef = payload.pull_request.head.ref;
+    prData = payload.pull_request;
   } else {
     console.log(`Ignoring event: ${ghEvent}/${payload.action}`);
     return { statusCode: 200, body: `Ignored: ${ghEvent}/${payload.action}` };
@@ -270,8 +334,63 @@ export async function handler(event: {
     SIGNAL_LABEL_RUNNING
   );
 
+  // --- Resolve commit SHA ---
+  console.log(`Resolving commit SHA for ref: ${requestedRef}`);
+  const resolvedCommitSha = await resolveCommitSha(
+    repoOwner,
+    repoName,
+    requestedRef,
+    isPR,
+    issueNumber,
+    githubToken
+  );
+  console.log(`Resolved ${requestedRef} to commit SHA: ${resolvedCommitSha}`);
+
+  // --- Create task payload ---
+  const taskId = generateTaskId();
+  const repoSlug = createRepoSlug(repoOwner, repoName);
+
+  // Extract label names from the webhook payload
+  const labels = isPR
+    ? (prData.labels || []).map((label: any) => label.name)
+    : (issueData.labels || []).map((label: any) => label.name);
+
+  const issueMetadata: IssueMetadata = {
+    number: issueNumber,
+    title: isPR ? prData.title : issueData.title,
+    body: isPR ? prData.body : issueData.body,
+    labels,
+    head_ref: isPR ? prData.head.ref : undefined,
+    base_ref: isPR ? prData.base.ref : undefined,
+    author: isPR ? prData.user.login : issueData.user.login,
+  };
+
+  const taskPayload: TaskPayload = {
+    task_id: taskId,
+    repo_slug: repoSlug,
+    requested_ref: requestedRef,
+    resolved_commit_sha: resolvedCommitSha,
+    issue_metadata: issueMetadata,
+    task_mode: isPR ? "pull_request" : "issue",
+    created_at: new Date().toISOString(),
+  };
+
+  console.log(`Created task ${taskId} with resolved SHA ${resolvedCommitSha}`);
+  console.log(`Task payload:`, JSON.stringify(taskPayload, null, 2));
+
   try {
     // --- Run Fargate task ---
+    const taskEnvironment: TaskEnvironment = {
+      TASK_PAYLOAD: JSON.stringify(taskPayload),
+      GITHUB_TOKEN: githubToken,
+      OPENROUTER_API_KEY: openrouterKey,
+      TRIGGER_LABEL,
+      SIGNAL_LABEL_RUNNING,
+      SIGNAL_LABEL_WAITING,
+      SIGNAL_LABEL_FAILED,
+      SIGNAL_LABEL_SUCCEEDED,
+    };
+
     const params: RunTaskCommandInput = {
       cluster: CLUSTER_ARN,
       taskDefinition: TASK_DEFINITION_ARN,
@@ -288,20 +407,10 @@ export async function handler(event: {
         containerOverrides: [
           {
             name: CONTAINER_NAME,
-            environment: [
-              { name: "GITHUB_TOKEN", value: githubToken },
-              { name: "OPENROUTER_API_KEY", value: openrouterKey },
-              { name: "REPO_OWNER", value: repoOwner },
-              { name: "REPO_NAME", value: repoName },
-              { name: "ISSUE_NUMBER", value: String(issueNumber) },
-              { name: "IS_PR", value: String(isPR) },
-              { name: "ACTION", value: payload.action },
-              { name: "TRIGGER_LABEL", value: TRIGGER_LABEL },
-              { name: "SIGNAL_LABEL_RUNNING", value: SIGNAL_LABEL_RUNNING },
-              { name: "SIGNAL_LABEL_WAITING", value: SIGNAL_LABEL_WAITING },
-              { name: "SIGNAL_LABEL_FAILED", value: SIGNAL_LABEL_FAILED },
-              { name: "SIGNAL_LABEL_SUCCEEDED", value: SIGNAL_LABEL_SUCCEEDED },
-            ],
+            environment: Object.entries(taskEnvironment).map(([name, value]) => ({
+              name,
+              value,
+            })),
           },
         ],
       },
@@ -322,10 +431,17 @@ export async function handler(event: {
     }
 
     console.log(`Started Fargate task: ${taskArn}`);
+    console.log(`Task metadata - ID: ${taskId}, SHA: ${resolvedCommitSha}, Repo: ${repoSlug}`);
 
     return {
       statusCode: 200,
-      body: JSON.stringify({ message: "Agent launched", taskArn }),
+      body: JSON.stringify({
+        message: "Agent launched",
+        taskArn,
+        taskId,
+        resolvedCommitSha,
+        repoSlug
+      }),
     };
   } catch (error) {
     const failureMessage = formatLaunchFailure(error);
