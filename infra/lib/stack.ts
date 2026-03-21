@@ -12,7 +12,8 @@ import { Construct } from "constructs";
 import * as path from "path";
 
 // SSM parameter names — created out-of-band (already exist)
-const PARAM_GITHUB_TOKEN = "/github-agent/GITHUB_TOKEN";
+const PARAM_GITHUB_APP_ID = "/github-agent/GITHUB_APP_ID";
+const PARAM_GITHUB_APP_PRIVATE_KEY = "/github-agent/GITHUB_APP_PRIVATE_KEY";
 const PARAM_WEBHOOK_SECRET = "/github-agent/GITHUB_WEBHOOK_SECRET";
 const PARAM_OPENROUTER_KEY = "/github-agent/OPENROUTER_API_KEY";
 
@@ -21,7 +22,8 @@ export class GitHubAgentStack extends cdk.Stack {
     super(scope, id, props);
 
     const ssmParamArns = [
-      PARAM_GITHUB_TOKEN,
+      PARAM_GITHUB_APP_ID,
+      PARAM_GITHUB_APP_PRIVATE_KEY,
       PARAM_WEBHOOK_SECRET,
       PARAM_OPENROUTER_KEY,
     ].map(
@@ -126,7 +128,8 @@ export class GitHubAgentStack extends cdk.Stack {
         SUBNETS: vpc.publicSubnets.map((s) => s.subnetId).join(","),
         SECURITY_GROUP: taskSecurityGroup.securityGroupId,
         WEBHOOK_SECRET_PARAM: PARAM_WEBHOOK_SECRET,
-        GITHUB_TOKEN_PARAM: PARAM_GITHUB_TOKEN,
+        GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
+        GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
         OPENROUTER_API_KEY_PARAM: PARAM_OPENROUTER_KEY,
       },
     });
