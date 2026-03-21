@@ -1,0 +1,109 @@
+name: Agent Task
+description: Request the GitHub agent to implement a feature, fix a bug, or make code changes
+title: '[Agent] '
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to request the GitHub agent to work on a coding task.
+        For best results, provide clear requirements and context.
+
+        **After creating the issue, add the `agent` label to activate the agent.**
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: What needs to be implemented, fixed, or changed?
+      placeholder: |
+        Example: The API returns 500 errors when users try to delete non-existent resources.
+
+        Be specific about what currently happens vs what should happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance Criteria
+      description: List the specific requirements for this task to be considered complete
+      placeholder: |
+        - [ ] DELETE /api/resources/{id} returns 404 for non-existent resources
+        - [ ] Error response includes helpful message: "Resource {id} not found"
+        - [ ] Add test case covering this scenario
+
+        Use checkboxes to make criteria clear and testable.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context & File References
+      description: Point to relevant files, functions, or existing behavior
+      placeholder: |
+        - Current implementation: `src/api/resources.ts:45` in `deleteResource()` function
+        - Related issue: #123 (similar pattern used for PATCH endpoints)
+        - Documentation: See API spec in `docs/api.md`
+
+        Help the agent understand the codebase and find the right starting point.
+    validations:
+      required: false
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Technical Constraints
+      description: Any requirements, limitations, or considerations
+      placeholder: |
+        - Must maintain backward compatibility with existing API clients
+        - Use existing error handling patterns from `src/utils/errors.ts`
+        - Performance: Should not add more than 10ms to response time
+        - Do not modify the database schema
+    validations:
+      required: false
+
+  - type: dropdown
+    id: task-size
+    attributes:
+      label: Expected Task Size
+      description: Rough estimate to help prioritize
+      options:
+        - Small (< 1 hour, few files)
+        - Medium (1-4 hours, multiple files)
+        - Large (> 4 hours, significant changes)
+        - Unknown
+      default: 1
+    validations:
+      required: false
+
+  - type: dropdown
+    id: urgency
+    attributes:
+      label: Urgency
+      description: How quickly does this need to be completed?
+      options:
+        - Low (when convenient)
+        - Medium (this week)
+        - High (within 24 hours)
+        - Critical (ASAP)
+      default: 1
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: agent-checklist
+    attributes:
+      label: Pre-submission Checklist
+      description: Verify you've provided enough information for the agent
+      options:
+        - label: I've provided a clear problem statement
+          required: true
+        - label: I've listed testable acceptance criteria
+          required: true
+        - label: I've included relevant file/function references where applicable
+          required: false
+        - label: I will add the `agent` label after creating this issue
+          required: true

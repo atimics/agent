@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 📖 Agent Documentation
+    url: https://github.com/atimics/agent#agent-workflow
+    about: Learn how to write effective agent tasks and understand the workflow
+  - name: 🤖 Agent Task Template
+    url: https://github.com/atimics/agent/issues/new?template=agent_task.yml
+    about: Request the agent to implement features, fix bugs, or make code changes
