@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-ecs": "^3.1010.0",
+    "@aws-sdk/client-s3": "^3.1014.0",
     "@aws-sdk/client-ssm": "^3.1010.0",
     "aws-cdk-lib": "^2.170.0",
     "constructs": "^10.4.2"

@@ -4,10 +4,13 @@ import * as ecs from "aws-cdk-lib/aws-ecs";
 import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as logs from "aws-cdk-lib/aws-logs";
+import * as s3 from "aws-cdk-lib/aws-s3";
 import * as apigwv2 from "aws-cdk-lib/aws-apigatewayv2";
 import * as apigwv2Integrations from "aws-cdk-lib/aws-apigatewayv2-integrations";
 import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as events from "aws-cdk-lib/aws-events";
+import * as targets from "aws-cdk-lib/aws-events-targets";
 import { Construct } from "constructs";
 import * as path from "path";
 
@@ -53,6 +56,25 @@ export class GitHubAgentStack extends cdk.Stack {
     });
 
     // -------------------------------------------------------
+    // S3 Bucket for Task Artifacts
+    // -------------------------------------------------------
+    const artifactsBucket = new s3.Bucket(this, "TaskArtifactsBucket", {
+      bucketName: `github-agent-artifacts-${this.account}-${this.region}`,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      publicReadAccess: false,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      lifecycleRules: [
+        {
+          id: "cleanup-old-artifacts",
+          enabled: true,
+          expiration: cdk.Duration.days(30), // Clean up artifacts after 30 days
+          abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
+        },
+      ],
+      versioned: false,
+    });
+
+    // -------------------------------------------------------
     // ECR Repository
     // -------------------------------------------------------
     const repository = new ecr.Repository(this, "AgentRepo", {
@@ -88,6 +110,9 @@ export class GitHubAgentStack extends cdk.Stack {
         resources: ssmParamArns,
       })
     );
+
+    // Grant S3 permissions for artifacts
+    artifactsBucket.grantReadWrite(taskRole);
 
     const taskDefinition = new ecs.FargateTaskDefinition(this, "AgentTask", {
       memoryLimitMiB: 2048,
@@ -131,6 +156,7 @@ export class GitHubAgentStack extends cdk.Stack {
         GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
         GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
         OPENROUTER_API_KEY_PARAM: PARAM_OPENROUTER_KEY,
+        ARTIFACTS_BUCKET: artifactsBucket.bucketName,
       },
     });
 
@@ -157,6 +183,56 @@ export class GitHubAgentStack extends cdk.Stack {
         resources: ssmParamArns,
       })
     );
+
+    // Grant S3 permissions for task metadata
+    artifactsBucket.grantReadWrite(webhookHandler);
+
+    // -------------------------------------------------------
+    // Cleanup/Reaper Lambda
+    // -------------------------------------------------------
+    const cleanupFunction = new NodejsFunction(this, "CleanupFunction", {
+      entry: path.join(__dirname, "cleanup-handler.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 512,
+      environment: {
+        CLUSTER_ARN: cluster.clusterArn,
+        TASK_DEFINITION_ARN: taskDefinition.taskDefinitionArn,
+        ARTIFACTS_BUCKET: artifactsBucket.bucketName,
+      },
+    });
+
+    // Grant permissions to the cleanup function
+    cleanupFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          "ecs:DescribeTasks",
+          "ecs:StopTask",
+          "ecs:ListTasks"
+        ],
+        resources: ["*"], // ECS tasks don't have predictable ARNs
+      })
+    );
+
+    artifactsBucket.grantReadWrite(cleanupFunction);
+
+    // -------------------------------------------------------
+    // EventBridge rule to trigger cleanup
+    // -------------------------------------------------------
+    const cleanupRule = new events.Rule(this, "CleanupRule", {
+      description: "Trigger cleanup of stale agent tasks",
+      schedule: events.Schedule.cron({
+        minute: "0",
+        hour: "*/2", // Every 2 hours
+        day: "*",
+        month: "*",
+        year: "*",
+      }),
+    });
+
+    cleanupRule.addTarget(new targets.LambdaFunction(cleanupFunction));
 
     // -------------------------------------------------------
     // API Gateway HTTP API
@@ -191,6 +267,11 @@ export class GitHubAgentStack extends cdk.Stack {
     new cdk.CfnOutput(this, "ClusterName", {
       value: cluster.clusterName,
       description: "ECS cluster name",
+    });
+
+    new cdk.CfnOutput(this, "ArtifactsBucket", {
+      value: artifactsBucket.bucketName,
+      description: "S3 bucket for task artifacts and metadata",
     });
   }
 }

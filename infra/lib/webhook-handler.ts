@@ -9,17 +9,25 @@ import {
   GetParameterCommand,
 } from "@aws-sdk/client-ssm";
 import {
+  S3Client,
+  PutObjectCommand,
+} from "@aws-sdk/client-s3";
+import {
   TaskPayload,
   IssueMetadata,
   generateTaskId,
   createRepoSlug,
   getInstallationToken,
+  createInitialTaskMetadata,
+  createArtifactKeys,
   type TaskEnvironment,
   type GitHubAppConfig,
+  type TaskMetadata,
 } from "./types";
 
 const ecs = new ECSClient({});
 const ssm = new SSMClient({});
+const s3 = new S3Client({});
 
 const CLUSTER_ARN = process.env.CLUSTER_ARN!;
 const TASK_DEFINITION_ARN = process.env.TASK_DEFINITION_ARN!;
@@ -30,6 +38,7 @@ const WEBHOOK_SECRET_PARAM = process.env.WEBHOOK_SECRET_PARAM!;
 const GITHUB_APP_ID_PARAM = process.env.GITHUB_APP_ID_PARAM!;
 const GITHUB_APP_PRIVATE_KEY_PARAM = process.env.GITHUB_APP_PRIVATE_KEY_PARAM!;
 const OPENROUTER_API_KEY_PARAM = process.env.OPENROUTER_API_KEY_PARAM!;
+const ARTIFACTS_BUCKET = process.env.ARTIFACTS_BUCKET!;
 const TRIGGER_LABEL = "agent";
 const SIGNAL_LABEL_RUNNING = "agent:running";
 const SIGNAL_LABEL_WAITING = "agent:waiting";
@@ -166,6 +175,32 @@ async function addIssueComment(
     },
     [201]
   );
+}
+
+async function storeTaskMetadata(
+  taskMetadata: TaskMetadata
+): Promise<void> {
+  const artifactKeys = createArtifactKeys(taskMetadata.artifact_prefix);
+
+  try {
+    await s3.send(new PutObjectCommand({
+      Bucket: ARTIFACTS_BUCKET,
+      Key: artifactKeys.metadata,
+      Body: JSON.stringify(taskMetadata, null, 2),
+      ContentType: "application/json",
+      Metadata: {
+        taskId: taskMetadata.task_id,
+        repoSlug: taskMetadata.repo_slug,
+        issueNumber: taskMetadata.issue_number.toString(),
+        status: taskMetadata.status,
+      },
+    }));
+
+    console.log(`Stored task metadata at ${artifactKeys.metadata}`);
+  } catch (error) {
+    console.error(`Failed to store task metadata:`, error);
+    throw error;
+  }
 }
 
 function formatLaunchFailure(error: unknown): string {
@@ -397,10 +432,13 @@ export async function handler(event: {
 
   try {
     // --- Run Fargate task ---
+    const taskMetadata = createInitialTaskMetadata(taskPayload);
     const taskEnvironment: TaskEnvironment = {
       TASK_PAYLOAD: JSON.stringify(taskPayload),
       GITHUB_TOKEN: githubToken,
       OPENROUTER_API_KEY: openrouterKey,
+      ARTIFACTS_BUCKET,
+      ARTIFACT_PREFIX: taskMetadata.artifact_prefix,
       TRIGGER_LABEL,
       SIGNAL_LABEL_RUNNING,
       SIGNAL_LABEL_WAITING,
@@ -449,6 +487,12 @@ export async function handler(event: {
 
     console.log(`Started Fargate task: ${taskArn}`);
     console.log(`Task metadata - ID: ${taskId}, SHA: ${resolvedCommitSha}, Repo: ${repoSlug}`);
+
+    // --- Store initial task metadata with ARN ---
+    taskMetadata.task_arn = taskArn;
+    taskMetadata.started_at = new Date().toISOString();
+    taskMetadata.status = "running";
+    await storeTaskMetadata(taskMetadata);
 
     return {
       statusCode: 200,
