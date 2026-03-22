@@ -607,8 +607,11 @@ while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
   # Run in non-interactive mode with the mission prompt
   # --dangerously-skip-permissions skips tool approval (we're in an isolated container)
   # Capture output for debugging failed runs
+  MODEL=$(echo "$TASK_PAYLOAD" | jq -r '.model // "anthropic/claude-haiku-4-5"')
+  echo "Using model: ${MODEL}"
+
   claude --dangerously-skip-permissions \
-    --model "anthropic/claude-sonnet-4" \
+    --model "${MODEL}" \
     --print \
     "${MISSION}" 2>&1 | tee "${AGENT_LOG}" || true
 
