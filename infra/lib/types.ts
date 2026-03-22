@@ -132,6 +132,8 @@ export interface TaskPayload {
   task_mode: "issue" | "pull_request";
   /** Timestamp when task was created */
   created_at: string;
+  /** Model to use for this task, defaults based on task type if not specified */
+  model?: string;
 }
 
 export interface IssueMetadata {

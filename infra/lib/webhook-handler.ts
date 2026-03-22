@@ -181,6 +181,47 @@ async function addIssueComment(
   );
 }
 
+async function getRepoModelConfig(
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<string | null> {
+  try {
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/contents/.github/AGENT.md`,
+      token,
+      { method: "GET" },
+      [200, 404]
+    );
+
+    if (response.status === 404) {
+      return null;
+    }
+
+    const content = await response.json();
+    if (content.type !== "file" || !content.content) {
+      return null;
+    }
+
+    // Decode base64 content
+    const decoded = Buffer.from(content.content, "base64").toString("utf8");
+
+    // Simple regex to extract model line: "model: anthropic/claude-sonnet-4"
+    const modelMatch = decoded.match(/^model:\s*(.+)$/m);
+    return modelMatch ? modelMatch[1].trim() : null;
+  } catch (error) {
+    console.log(`Failed to fetch .github/AGENT.md: ${error}`);
+    return null;
+  }
+}
+
+function getDefaultModel(taskMode: "issue" | "pull_request"): string {
+  // Use latest 4.6 models per comment in issue #29
+  return taskMode === "issue"
+    ? "anthropic/claude-haiku-4-5"
+    : "anthropic/claude-sonnet-4-6";
+}
+
 async function mergePullRequest(
   repoOwner: string,
   repoName: string,
@@ -579,6 +620,19 @@ export async function handler(event: {
     author: isPR ? prData.user.login : issueData.user.login,
   };
 
+  // --- Determine model to use ---
+  const taskMode = isPR ? "pull_request" : "issue";
+  let selectedModel = getDefaultModel(taskMode);
+
+  // Check for per-repo model override
+  const repoModelConfig = await getRepoModelConfig(repoOwner, repoName, githubToken);
+  if (repoModelConfig) {
+    selectedModel = repoModelConfig;
+    console.log(`Using repo-specific model from .github/AGENT.md: ${selectedModel}`);
+  } else {
+    console.log(`Using default model for ${taskMode}: ${selectedModel}`);
+  }
+
   const taskPayload: TaskPayload = {
     task_id: taskId,
     repo_slug: repoSlug,
@@ -587,6 +641,7 @@ export async function handler(event: {
     issue_metadata: issueMetadata,
     task_mode: isPR ? "pull_request" : "issue",
     created_at: new Date().toISOString(),
+    model: selectedModel,
   };
 
   console.log(`Created task ${taskId} with resolved SHA ${resolvedCommitSha}`);
