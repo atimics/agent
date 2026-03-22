@@ -321,7 +321,7 @@ export class GitHubAgentStack extends cdk.Stack {
         SECURITY_GROUP: taskSecurityGroup.securityGroupId,
         GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
         GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
-        ANTHROPIC_API_KEY_PARAM: PARAM_ANTHROPIC_KEY,
+        OPENROUTER_API_KEY_PARAM: PARAM_OPENROUTER_KEY,
         ARTIFACTS_BUCKET: artifactsBucket.bucketName,
       },
     });

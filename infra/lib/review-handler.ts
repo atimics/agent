@@ -33,7 +33,7 @@ const SUBNETS = process.env.SUBNETS!;
 const SECURITY_GROUP = process.env.SECURITY_GROUP!;
 const GITHUB_APP_ID_PARAM = process.env.GITHUB_APP_ID_PARAM!;
 const GITHUB_APP_PRIVATE_KEY_PARAM = process.env.GITHUB_APP_PRIVATE_KEY_PARAM!;
-const ANTHROPIC_API_KEY_PARAM = process.env.ANTHROPIC_API_KEY_PARAM!;
+const OPENROUTER_API_KEY_PARAM = process.env.OPENROUTER_API_KEY_PARAM!;
 const ARTIFACTS_BUCKET = process.env.ARTIFACTS_BUCKET!;
 
 // Bot username for filtering PRs created by the coding agent
@@ -204,7 +204,7 @@ async function checkProtectedPaths(
 async function startReviewTask(
   pr: any,
   githubToken: string,
-  anthropicApiKey: string
+  openrouterApiKey: string
 ): Promise<string> {
   const taskId = generateTaskId();
   const repoSlug = pr.repo;
@@ -245,7 +245,7 @@ async function startReviewTask(
   const reviewEnvironment: ReviewEnvironment = {
     REVIEW_PAYLOAD: JSON.stringify(reviewPayload),
     GITHUB_TOKEN: githubToken,
-    ANTHROPIC_API_KEY: anthropicApiKey,
+    OPENROUTER_API_KEY: openrouterApiKey,
     ARTIFACTS_BUCKET,
     ARTIFACT_PREFIX: artifactPrefix,
     REPO: repoSlug,
@@ -315,6 +315,140 @@ async function startReviewTask(
 }
 
 /**
+ * Merges PRs with review:approved label that have been approved for >1 hour
+ */
+async function mergeApprovedPRs(token: string): Promise<void> {
+  console.log("Checking for PRs ready for auto-merge...");
+
+  const testRepos = [
+    "cenetex/agent" // This repository for testing
+  ];
+
+  for (const repo of testRepos) {
+    try {
+      console.log(`Checking repository for approved PRs: ${repo}`);
+
+      const response = await githubRequest(
+        `/repos/${repo}/pulls?state=open&per_page=100`,
+        token,
+        { method: "GET" },
+        [200]
+      );
+
+      const prs = await response.json() as any[];
+
+      // Filter PRs with review:approved label
+      const approvedPRs = prs.filter((pr: any) => {
+        const hasApprovedLabel = pr.labels.some((label: any) =>
+          label.name === "review:approved"
+        );
+
+        const hasPauseLabel = pr.labels.some((label: any) =>
+          label.name === "pause-agent"
+        );
+
+        return hasApprovedLabel && !hasPauseLabel;
+      });
+
+      for (const pr of approvedPRs) {
+        try {
+          // Get the label events to check when review:approved was added
+          const labelsResponse = await githubRequest(
+            `/repos/${repo}/issues/${pr.number}/events`,
+            token,
+            { method: "GET" },
+            [200]
+          );
+
+          const events = await labelsResponse.json() as any[];
+
+          // Find the most recent "labeled" event for "review:approved"
+          const approvedEvent = events
+            .filter((event: any) =>
+              event.event === "labeled" &&
+              event.label?.name === "review:approved"
+            )
+            .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
+
+          if (!approvedEvent) {
+            console.log(`PR ${pr.number}: No review:approved label event found, skipping`);
+            continue;
+          }
+
+          const labeledAt = new Date(approvedEvent.created_at);
+          const now = new Date();
+          const hoursSinceApproval = (now.getTime() - labeledAt.getTime()) / (1000 * 60 * 60);
+
+          if (hoursSinceApproval < 1) {
+            console.log(`PR ${pr.number}: Only ${hoursSinceApproval.toFixed(2)} hours since approval, waiting`);
+            continue;
+          }
+
+          console.log(`PR ${pr.number}: ${hoursSinceApproval.toFixed(2)} hours since approval, merging...`);
+
+          // Attempt to merge the PR
+          const mergeResponse = await githubRequest(
+            `/repos/${repo}/pulls/${pr.number}/merge`,
+            token,
+            {
+              method: "PUT",
+              body: JSON.stringify({
+                commit_title: `Auto-merge: ${pr.title}`,
+                commit_message: `Auto-merged by review agent after 1-hour hold period.`,
+                merge_method: "squash"
+              })
+            },
+            [200]
+          );
+
+          const mergeResult = await mergeResponse.json() as any;
+
+          if (mergeResult.merged) {
+            console.log(`Successfully auto-merged PR ${pr.number}: ${pr.title}`);
+
+            // Add a final comment
+            await githubRequest(
+              `/repos/${repo}/issues/${pr.number}/comments`,
+              token,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  body: `✅ **Auto-merged successfully**\n\nThis PR was automatically merged after the 1-hour hold period.\n\n🔗 **Merge SHA:** \`${mergeResult.sha}\``
+                }),
+              },
+              [201]
+            );
+          }
+
+        } catch (error) {
+          console.error(`Error auto-merging PR ${pr.number}:`, error);
+
+          // Add comment about merge failure
+          try {
+            await githubRequest(
+              `/repos/${repo}/issues/${pr.number}/comments`,
+              token,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  body: `⚠️ **Auto-merge failed**\n\nThe automatic merge failed. Manual intervention required.\n\n**Error:** ${error instanceof Error ? error.message : "Unknown error"}`
+                }),
+              },
+              [201]
+            );
+          } catch (commentError) {
+            console.error(`Failed to add merge failure comment:`, commentError);
+          }
+        }
+      }
+
+    } catch (error) {
+      console.error(`Error checking repository ${repo} for auto-merge:`, error);
+    }
+  }
+}
+
+/**
  * Main handler function triggered by EventBridge
  */
 export async function handler() {
@@ -322,10 +456,10 @@ export async function handler() {
 
   try {
     // Get credentials
-    const [appId, privateKey, anthropicApiKey] = await Promise.all([
+    const [appId, privateKey, openrouterApiKey] = await Promise.all([
       getParameter(GITHUB_APP_ID_PARAM),
       getParameter(GITHUB_APP_PRIVATE_KEY_PARAM),
-      getParameter(ANTHROPIC_API_KEY_PARAM),
+      getParameter(OPENROUTER_API_KEY_PARAM),
     ]);
 
     const appConfig: GitHubAppConfig = {
@@ -339,6 +473,9 @@ export async function handler() {
 
     // Discover reviewable PRs
     const reviewablePRs = await discoverReviewablePRs(githubToken);
+
+    // After discovering and reviewing new PRs, also merge approved ones
+    await mergeApprovedPRs(githubToken);
 
     if (reviewablePRs.length === 0) {
       console.log("No PRs need review at this time");
@@ -396,7 +533,7 @@ This PR will not be auto-merged and needs manual review.`
         }
 
         // Start review task
-        const taskArn = await startReviewTask(pr, githubToken, anthropicApiKey);
+        const taskArn = await startReviewTask(pr, githubToken, openrouterApiKey);
 
         results.push({
           pr: pr.number,
