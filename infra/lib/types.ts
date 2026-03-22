@@ -327,3 +327,112 @@ export function createInitialTaskMetadata(
     issue_metadata: taskPayload.issue_metadata,
   };
 }
+
+/**
+ * Review Agent Types
+ */
+
+export interface ReviewPayload {
+  /** Unique identifier for this review task */
+  task_id: string;
+  /** Repository in owner/name format */
+  repo_slug: string;
+  /** PR number to review */
+  pr_number: number;
+  /** The commit SHA at the head of the PR */
+  head_sha: string;
+  /** The base branch commit SHA */
+  base_sha: string;
+  /** PR metadata */
+  pr_metadata: PRMetadata;
+  /** Timestamp when review was requested */
+  created_at: string;
+}
+
+export interface PRMetadata {
+  /** PR number */
+  number: number;
+  /** PR title */
+  title: string;
+  /** PR body */
+  body: string;
+  /** Array of label names */
+  labels: string[];
+  /** PR author */
+  author: string;
+  /** Head branch name */
+  head_ref: string;
+  /** Base branch name */
+  base_ref: string;
+  /** Created by the coding agent */
+  created_by_bot: boolean;
+}
+
+export interface ReviewResult {
+  /** Unique review task identifier */
+  task_id: string;
+  /** PR number that was reviewed */
+  pr_number: number;
+  /** Review decision: approved, changes_requested, or error */
+  decision: "approved" | "changes_requested" | "error";
+  /** Structured review findings */
+  findings: ReviewFindings;
+  /** Error message if review failed */
+  error?: string;
+  /** Review completion timestamp */
+  completed_at: string;
+}
+
+export interface ReviewFindings {
+  /** Does the code compile/pass linting? */
+  compilation: {
+    status: "pass" | "fail" | "unknown";
+    details?: string;
+  };
+  /** Are there security issues? */
+  security: {
+    status: "pass" | "fail" | "unknown";
+    issues?: string[];
+  };
+  /** Does it address the linked issue? */
+  issue_alignment: {
+    status: "pass" | "fail" | "unknown";
+    details?: string;
+  };
+  /** Are there obvious logic errors? */
+  logic: {
+    status: "pass" | "fail" | "unknown";
+    issues?: string[];
+  };
+  /** Does it introduce unnecessary complexity? */
+  complexity: {
+    status: "pass" | "fail" | "unknown";
+    details?: string;
+  };
+  /** Is the cost impact reasonable? */
+  cost_impact: {
+    status: "pass" | "fail" | "unknown";
+    details?: string;
+  };
+  /** Overall summary */
+  summary: string;
+}
+
+export interface ReviewEnvironment {
+  /** The complete review payload as JSON string */
+  REVIEW_PAYLOAD: string;
+  /** GitHub installation token for API access */
+  GITHUB_TOKEN: string;
+  /** Anthropic API key for direct API access */
+  ANTHROPIC_API_KEY: string;
+  /** S3 bucket for review artifacts */
+  ARTIFACTS_BUCKET: string;
+  /** S3 prefix for this review's artifacts */
+  ARTIFACT_PREFIX: string;
+  /** Repository in owner/name format */
+  REPO: string;
+  /** PR number being reviewed */
+  PR_NUMBER: string;
+  /** Review criteria configuration */
+  REVIEW_CRITERIA: string;
+}

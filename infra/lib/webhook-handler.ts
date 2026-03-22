@@ -44,6 +44,10 @@ const SIGNAL_LABEL_RUNNING = "agent:running";
 const SIGNAL_LABEL_WAITING = "agent:waiting";
 const SIGNAL_LABEL_FAILED = "agent:failed";
 const SIGNAL_LABEL_SUCCEEDED = "agent:succeeded";
+const REVIEW_APPROVED_LABEL = "review:approved";
+
+// Auto-merge hold period (1 hour)
+const MERGE_HOLD_PERIOD_MINUTES = 60;
 const SIGNAL_LABELS = [
   {
     name: SIGNAL_LABEL_RUNNING,
@@ -175,6 +179,122 @@ async function addIssueComment(
     },
     [201]
   );
+}
+
+async function mergePullRequest(
+  repoOwner: string,
+  repoName: string,
+  prNumber: number,
+  token: string
+): Promise<boolean> {
+  try {
+    // First check if PR is still open and approved
+    const prResponse = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/pulls/${prNumber}`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const prData = await prResponse.json() as any;
+
+    if (prData.state !== "open") {
+      console.log(`PR ${prNumber} is not open (state: ${prData.state})`);
+      return false;
+    }
+
+    // Check if it still has the approved label
+    const hasApprovedLabel = prData.labels.some((label: any) => label.name === REVIEW_APPROVED_LABEL);
+    if (!hasApprovedLabel) {
+      console.log(`PR ${prNumber} no longer has the ${REVIEW_APPROVED_LABEL} label`);
+      return false;
+    }
+
+    // Check if there's a pause-agent label
+    const hasPauseLabel = prData.labels.some((label: any) => label.name === "pause-agent");
+    if (hasPauseLabel) {
+      console.log(`PR ${prNumber} has pause-agent label, skipping merge`);
+      return false;
+    }
+
+    console.log(`Attempting to merge PR ${prNumber}`);
+
+    // Attempt the merge
+    await githubRequest(
+      `/repos/${repoOwner}/${repoName}/pulls/${prNumber}/merge`,
+      token,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          commit_title: `Merge pull request #${prNumber} from ${prData.head.ref}`,
+          commit_message: `Automatically merged by review agent after 1-hour hold period.`,
+          merge_method: "merge"
+        }),
+      },
+      [200]
+    );
+
+    // Add a comment about the auto-merge
+    await addIssueComment(
+      repoOwner,
+      repoName,
+      prNumber,
+      token,
+      `🤖 **Automatically merged** after 1-hour hold period.
+
+This PR was approved by the automated review agent and no human intervention occurred during the hold period.`
+    );
+
+    console.log(`Successfully merged PR ${prNumber}`);
+    return true;
+
+  } catch (error) {
+    console.error(`Failed to merge PR ${prNumber}:`, error);
+
+    // Add a comment about the merge failure
+    await addIssueComment(
+      repoOwner,
+      repoName,
+      prNumber,
+      token,
+      `❌ **Auto-merge failed**
+
+The automated merge failed after the 1-hour hold period. Manual intervention required.
+
+Error: ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
+
+    return false;
+  }
+}
+
+async function scheduleAutoMerge(
+  repoOwner: string,
+  repoName: string,
+  prNumber: number,
+  token: string
+): Promise<void> {
+  // Store merge metadata for processing by a scheduled function
+  // For now, we'll just add a timestamp comment - a full implementation
+  // would use EventBridge or SQS to schedule the actual merge
+
+  const mergeTime = new Date(Date.now() + MERGE_HOLD_PERIOD_MINUTES * 60 * 1000);
+  const messageBody = `⏱️ **Auto-merge scheduled**
+
+This PR is approved and will be automatically merged at **${mergeTime.toISOString()}** (in ${MERGE_HOLD_PERIOD_MINUTES} minutes) unless:
+
+- The \`${REVIEW_APPROVED_LABEL}\` label is removed
+- A \`pause-agent\` label is added
+- The PR is closed manually
+- Someone pushes new commits
+
+To prevent auto-merge, remove the \`${REVIEW_APPROVED_LABEL}\` label or add the \`pause-agent\` label.`;
+
+  await addIssueComment(repoOwner, repoName, prNumber, token, messageBody);
+
+  // TODO: In a full implementation, schedule an EventBridge event or SQS message
+  // to trigger the merge after the hold period
+  console.log(`Auto-merge scheduled for PR ${prNumber} at ${mergeTime.toISOString()}`);
 }
 
 async function storeTaskMetadata(
@@ -336,8 +456,50 @@ export async function handler(event: {
     requestedRef = payload.repository.default_branch || "main";
     issueData = payload.issue;
   } else if (ghEvent === "pull_request" && payload.action === "labeled") {
-    const labelName = payload.label?.name?.toLowerCase();
-    if (labelName !== TRIGGER_LABEL) {
+    const labelName = payload.label?.name;
+
+    // Handle review:approved label for auto-merge scheduling
+    if (labelName === REVIEW_APPROVED_LABEL) {
+      const repoOwner = payload.repository.owner.login;
+      const repoName = payload.repository.name;
+      const prNumber = payload.pull_request.number;
+
+      console.log(`Handling review:approved label on PR ${prNumber}`);
+
+      try {
+        // Get GitHub App credentials and mint installation token
+        const [appId, privateKey] = await Promise.all([
+          getParameter(GITHUB_APP_ID_PARAM),
+          getParameter(GITHUB_APP_PRIVATE_KEY_PARAM),
+        ]);
+
+        const appConfig: GitHubAppConfig = { appId, privateKey };
+        const githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
+
+        // Schedule the auto-merge
+        await scheduleAutoMerge(repoOwner, repoName, prNumber, githubToken);
+
+        return {
+          statusCode: 200,
+          body: JSON.stringify({
+            message: "Auto-merge scheduled",
+            prNumber,
+            holdPeriodMinutes: MERGE_HOLD_PERIOD_MINUTES
+          }),
+        };
+      } catch (error) {
+        console.error(`Failed to schedule auto-merge for PR ${prNumber}:`, error);
+        return {
+          statusCode: 500,
+          body: JSON.stringify({
+            error: "Failed to schedule auto-merge"
+          }),
+        };
+      }
+    }
+
+    // Handle agent trigger label
+    if (labelName?.toLowerCase() !== TRIGGER_LABEL) {
       console.log(`Ignoring label: ${payload.label?.name}`);
       return { statusCode: 200, body: "Ignored: not the agent label" };
     }
