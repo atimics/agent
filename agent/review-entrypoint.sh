@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # --- Required env vars (passed by Lambda via Fargate overrides) ---
 : "${GITHUB_TOKEN:?Missing GITHUB_TOKEN}"
-: "${ANTHROPIC_API_KEY:?Missing ANTHROPIC_API_KEY}"
+: "${OPENROUTER_API_KEY:?Missing OPENROUTER_API_KEY}"
 : "${REVIEW_PAYLOAD:?Missing REVIEW_PAYLOAD}"
 : "${ARTIFACTS_BUCKET:?Missing ARTIFACTS_BUCKET}"
 : "${ARTIFACT_PREFIX:?Missing ARTIFACT_PREFIX}"
@@ -316,16 +316,18 @@ You are in the PR head worktree (${HEAD_SHA}). The base version is available at 
 
 Begin your review now."
 
-# --- Run Claude with direct Anthropic API ---
+# --- Run Claude with OpenRouter API ---
 echo "Running review analysis with Claude Opus..."
-export ANTHROPIC_MODEL="claude-3-opus-20240229"
+export ANTHROPIC_BASE_URL="https://openrouter.ai/api/v1"
+export ANTHROPIC_AUTH_TOKEN="${OPENROUTER_API_KEY}"
+export ANTHROPIC_API_KEY=""
 
 # Change to the PR head worktree for analysis
 cd ../pr-worktree
 
 # Run Claude Code with the review mission
 claude --dangerously-skip-permissions \
-  --model "${ANTHROPIC_MODEL}" \
+  --model "anthropic/claude-opus-4-6" \
   --print \
   "${REVIEW_MISSION}" 2>&1 | tee "${REVIEW_LOG}"
 

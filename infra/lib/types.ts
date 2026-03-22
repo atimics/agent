@@ -423,8 +423,8 @@ export interface ReviewEnvironment {
   REVIEW_PAYLOAD: string;
   /** GitHub installation token for API access */
   GITHUB_TOKEN: string;
-  /** Anthropic API key for direct API access */
-  ANTHROPIC_API_KEY: string;
+  /** OpenRouter API key for model access */
+  OPENROUTER_API_KEY: string;
   /** S3 bucket for review artifacts */
   ARTIFACTS_BUCKET: string;
   /** S3 prefix for this review's artifacts */
