@@ -151,6 +151,73 @@ export interface IssueMetadata {
   author: string;
 }
 
+/**
+ * Task lifecycle states
+ */
+export type TaskLifecycleState =
+  | "requested"     // Task has been created and queued
+  | "running"       // Task is currently executing
+  | "succeeded"     // Task completed successfully
+  | "failed"        // Task failed during execution
+  | "timed_out"     // Task exceeded time limit
+  | "waiting";      // Task is waiting for user input
+
+/**
+ * Task metadata record for persistence
+ */
+export interface TaskMetadata {
+  /** Unique task identifier */
+  task_id: string;
+  /** Repository in owner/name format */
+  repo_slug: string;
+  /** Issue or PR number */
+  issue_number: number;
+  /** Task execution mode */
+  task_mode: "issue" | "pull_request";
+  /** Current lifecycle state */
+  status: TaskLifecycleState;
+  /** The original reference that was requested */
+  requested_ref: string;
+  /** The immutable commit SHA that was resolved */
+  resolved_commit_sha: string;
+  /** Fargate task ARN */
+  task_arn?: string;
+  /** S3 artifact prefix for this task */
+  artifact_prefix: string;
+  /** Task creation timestamp */
+  created_at: string;
+  /** Task start timestamp */
+  started_at?: string;
+  /** Task completion timestamp */
+  completed_at?: string;
+  /** Error message if failed */
+  error_message?: string;
+  /** Created PR URL if applicable */
+  pr_url?: string;
+  /** Issue/PR metadata at task creation time */
+  issue_metadata: IssueMetadata;
+}
+
+/**
+ * Artifact manifest for a task execution
+ */
+export interface TaskArtifacts {
+  /** Unique task identifier */
+  task_id: string;
+  /** Task metadata file location */
+  metadata_key: string;
+  /** Agent log file location */
+  log_key?: string;
+  /** Summary file location */
+  summary_key?: string;
+  /** Exit code from task execution */
+  exit_code?: number;
+  /** Size of artifacts in bytes */
+  total_size_bytes?: number;
+  /** Artifact creation timestamp */
+  created_at: string;
+}
+
 export interface TaskResult {
   /** Unique task identifier */
   task_id: string;
@@ -176,6 +243,10 @@ export interface TaskEnvironment {
   GITHUB_TOKEN: string;
   /** OpenRouter API key */
   OPENROUTER_API_KEY: string;
+  /** S3 bucket for artifacts */
+  ARTIFACTS_BUCKET: string;
+  /** S3 prefix for this task's artifacts */
+  ARTIFACT_PREFIX: string;
   /** Signal labels for status tracking */
   TRIGGER_LABEL: string;
   SIGNAL_LABEL_RUNNING: string;
@@ -209,4 +280,50 @@ export function parseRepoSlug(repoSlug: string): { owner: string; name: string }
  */
 export function createRepoSlug(owner: string, name: string): string {
   return `${owner}/${name}`;
+}
+
+/**
+ * Creates a predictable artifact prefix for a task
+ */
+export function createArtifactPrefix(repoSlug: string, taskId: string): string {
+  return `tasks/${repoSlug}/${taskId}`;
+}
+
+/**
+ * Creates standardized S3 keys for task artifacts
+ */
+export function createArtifactKeys(artifactPrefix: string) {
+  return {
+    metadata: `${artifactPrefix}/metadata.json`,
+    log: `${artifactPrefix}/agent.log`,
+    summary: `${artifactPrefix}/summary.md`,
+    manifest: `${artifactPrefix}/manifest.json`,
+  };
+}
+
+/**
+ * Creates initial task metadata when task is requested
+ */
+export function createInitialTaskMetadata(
+  taskPayload: TaskPayload,
+  taskArn?: string
+): TaskMetadata {
+  const artifactPrefix = createArtifactPrefix(
+    taskPayload.repo_slug,
+    taskPayload.task_id
+  );
+
+  return {
+    task_id: taskPayload.task_id,
+    repo_slug: taskPayload.repo_slug,
+    issue_number: taskPayload.issue_metadata.number,
+    task_mode: taskPayload.task_mode,
+    status: "requested",
+    requested_ref: taskPayload.requested_ref,
+    resolved_commit_sha: taskPayload.resolved_commit_sha,
+    task_arn: taskArn,
+    artifact_prefix: artifactPrefix,
+    created_at: taskPayload.created_at,
+    issue_metadata: taskPayload.issue_metadata,
+  };
 }
