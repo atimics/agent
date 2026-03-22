@@ -5,6 +5,8 @@ set -Eeuo pipefail
 : "${GITHUB_TOKEN:?Missing GITHUB_TOKEN}"
 : "${OPENROUTER_API_KEY:?Missing OPENROUTER_API_KEY}"
 : "${TASK_PAYLOAD:?Missing TASK_PAYLOAD}"
+: "${ARTIFACTS_BUCKET:?Missing ARTIFACTS_BUCKET}"
+: "${ARTIFACT_PREFIX:?Missing ARTIFACT_PREFIX}"
 : "${TRIGGER_LABEL:=agent}"
 : "${SIGNAL_LABEL_RUNNING:=agent:running}"
 : "${SIGNAL_LABEL_WAITING:=agent:waiting}"
@@ -49,6 +51,12 @@ SIGNAL_LABELS=(
   "${SIGNAL_LABEL_SUCCEEDED}"
 )
 
+# S3 artifact keys
+METADATA_KEY="${ARTIFACT_PREFIX}/metadata.json"
+LOG_KEY="${ARTIFACT_PREFIX}/agent.log"
+SUMMARY_KEY="${ARTIFACT_PREFIX}/summary.md"
+MANIFEST_KEY="${ARTIFACT_PREFIX}/manifest.json"
+
 set_signal_label() {
   local target_label="$1"
   local label
@@ -63,19 +71,174 @@ set_signal_label() {
   gh issue edit "${ISSUE_NUMBER}" --add-label "${target_label}" -R "${REPO}" >/dev/null 2>&1 || true
 }
 
+update_task_metadata() {
+  local status="$1"
+  local error_message="$2"
+  local pr_url="$3"
+  local completed_timestamp=""
+
+  if [ "$status" != "running" ]; then
+    completed_timestamp="\"completed_at\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\","
+  fi
+
+  # Create updated metadata JSON
+  local metadata_json
+  metadata_json=$(cat <<EOF
+{
+  "task_id": "${TASK_ID}",
+  "repo_slug": "${REPO_SLUG}",
+  "issue_number": ${ISSUE_NUMBER},
+  "task_mode": "${TASK_MODE}",
+  "status": "${status}",
+  "requested_ref": "${REQUESTED_REF}",
+  "resolved_commit_sha": "${RESOLVED_COMMIT_SHA}",
+  "task_arn": "$(echo "$TASK_PAYLOAD" | jq -r '.task_arn // empty')",
+  "artifact_prefix": "${ARTIFACT_PREFIX}",
+  "created_at": "${CREATED_AT}",
+  "started_at": "${RUN_STARTED_AT}",
+  ${completed_timestamp}
+  "error_message": $(if [ -n "$error_message" ]; then echo "\"$error_message\""; else echo "null"; fi),
+  "pr_url": $(if [ -n "$pr_url" ]; then echo "\"$pr_url\""; else echo "null"; fi),
+  "issue_metadata": $(echo "$TASK_PAYLOAD" | jq '.issue_metadata')
+}
+EOF
+)
+
+  # Upload metadata to S3
+  echo "$metadata_json" | aws s3 cp - "s3://${ARTIFACTS_BUCKET}/${METADATA_KEY}" --content-type "application/json" || true
+}
+
+upload_artifacts() {
+  local exit_code="$1"
+  local pr_url="$2"
+
+  # Upload agent log if it exists
+  if [ -f "${AGENT_LOG}" ] && [ -s "${AGENT_LOG}" ]; then
+    aws s3 cp "${AGENT_LOG}" "s3://${ARTIFACTS_BUCKET}/${LOG_KEY}" --content-type "text/plain" || true
+  fi
+
+  # Create and upload task manifest
+  local manifest_json
+  manifest_json=$(cat <<EOF
+{
+  "task_id": "${TASK_ID}",
+  "metadata_key": "${METADATA_KEY}",
+  "log_key": "$(if [ -f "${AGENT_LOG}" ] && [ -s "${AGENT_LOG}" ]; then echo "${LOG_KEY}"; else echo "null"; fi)",
+  "summary_key": null,
+  "exit_code": ${exit_code},
+  "total_size_bytes": $(if [ -f "${AGENT_LOG}" ]; then wc -c < "${AGENT_LOG}"; else echo "0"; fi),
+  "created_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+}
+EOF
+)
+
+  echo "$manifest_json" | aws s3 cp - "s3://${ARTIFACTS_BUCKET}/${MANIFEST_KEY}" --content-type "application/json" || true
+}
+
+create_completion_summary() {
+  local status="$1"
+  local pr_url="$2"
+  local error_message="$3"
+
+  local summary=""
+  case "$status" in
+    "succeeded")
+      if [ "${IS_PR}" = "true" ]; then
+        summary="✅ **Agent run completed successfully**
+
+The agent has reviewed and processed PR #${ISSUE_NUMBER}.
+
+**Task Details:**
+- Task ID: \`${TASK_ID}\`
+- Commit SHA: \`${RESOLVED_COMMIT_SHA}\`
+- Completed at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+[View artifacts](https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${ARTIFACT_PREFIX}/)"
+      elif [ -n "$pr_url" ]; then
+        summary="✅ **Agent run completed successfully**
+
+The agent has created a pull request to address issue #${ISSUE_NUMBER}: $pr_url
+
+**Task Details:**
+- Task ID: \`${TASK_ID}\`
+- Commit SHA: \`${RESOLVED_COMMIT_SHA}\`
+- Completed at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+[View artifacts](https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${ARTIFACT_PREFIX}/)"
+      else
+        summary="✅ **Agent run completed**
+
+The agent has finished working on issue #${ISSUE_NUMBER}.
+
+**Task Details:**
+- Task ID: \`${TASK_ID}\`
+- Commit SHA: \`${RESOLVED_COMMIT_SHA}\`
+- Completed at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+[View artifacts](https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${ARTIFACT_PREFIX}/)"
+      fi
+      ;;
+    "waiting")
+      summary="⏸️ **Agent is waiting for confirmation**
+
+The agent has asked questions and is waiting for your response before continuing.
+
+**Task Details:**
+- Task ID: \`${TASK_ID}\`
+- Commit SHA: \`${RESOLVED_COMMIT_SHA}\`
+
+[View artifacts](https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${ARTIFACT_PREFIX}/)"
+      ;;
+    "failed")
+      summary="❌ **Agent run failed**
+
+The agent encountered an error while working on issue #${ISSUE_NUMBER}.
+
+**Task Details:**
+- Task ID: \`${TASK_ID}\`
+- Commit SHA: \`${RESOLVED_COMMIT_SHA}\`
+- Failed at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+$(if [ -n "$error_message" ]; then echo "- Error: $error_message"; fi)
+
+[View artifacts](https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${ARTIFACT_PREFIX}/)"
+      ;;
+  esac
+
+  echo "$summary"
+}
+
 on_exit() {
   local exit_code=$?
+  local pr_url=""
 
   set +e
 
   if [ "${RUN_STATUS}" = "waiting" ] && [ "${exit_code}" -eq 0 ]; then
     set_signal_label "${SIGNAL_LABEL_WAITING}"
+    update_task_metadata "waiting" "" ""
+    upload_artifacts "$exit_code" ""
+
+    local summary=$(create_completion_summary "waiting" "" "")
+    gh issue comment "${ISSUE_NUMBER}" -R "${REPO}" --body "$summary" >/dev/null 2>&1 || true
+
     echo "=== Agent waiting for confirmation ==="
     exit 0
   fi
 
   if [ "${RUN_STATUS}" = "succeeded" ] && [ "${exit_code}" -eq 0 ]; then
     set_signal_label "${SIGNAL_LABEL_SUCCEEDED}"
+
+    # Find created PR URL if this was an issue
+    if [ "${IS_PR}" = "false" ]; then
+      pr_url="$(find_created_pr_url)"
+    fi
+
+    update_task_metadata "succeeded" "" "$pr_url"
+    upload_artifacts "$exit_code" "$pr_url"
+
+    local summary=$(create_completion_summary "succeeded" "$pr_url" "")
+    gh issue comment "${ISSUE_NUMBER}" -R "${REPO}" --body "$summary" >/dev/null 2>&1 || true
+
     echo "=== Agent finished ==="
     echo "Task ID: ${TASK_ID}"
     echo "Commit SHA: ${RESOLVED_COMMIT_SHA}"
@@ -86,9 +249,11 @@ on_exit() {
   set_signal_label "${SIGNAL_LABEL_FAILED}"
 
   # Prepare detailed error message based on the stage
+  local error_message="${CURRENT_STAGE}"
   local error_details=""
   case "${CURRENT_STAGE}" in
     "authenticate GitHub CLI")
+      error_message="Authentication failed"
       error_details="
 
 **Authentication Issue**: The GitHub App installation token is invalid or lacks sufficient permissions.
@@ -100,6 +265,7 @@ Please check:
 - The repository is accessible with the GitHub App installation"
       ;;
     "clone repository"|"fetch issue context")
+      error_message="Repository access failed"
       error_details="
 
 **Repository Access Issue**: Unable to access repository \`${REPO}\` or issue/PR #${ISSUE_NUMBER}.
@@ -110,9 +276,13 @@ Please check:
 - The issue/PR number is correct"
       ;;
     *)
-      error_details=""
+      error_message="Task failed during ${CURRENT_STAGE}"
       ;;
   esac
+
+  # Update metadata and upload artifacts
+  update_task_metadata "failed" "$error_message" ""
+  upload_artifacts "$exit_code" ""
 
   # Include last 50 lines of agent output if available
   local log_tail=""
@@ -127,12 +297,12 @@ $(tail -50 "${AGENT_LOG}")
 </details>"
   fi
 
-  gh issue comment "${ISSUE_NUMBER}" -R "${REPO}" --body "$(cat <<EOF
-Agent run failed during \`${CURRENT_STAGE}\`.${error_details}${log_tail}
+  # Create completion summary
+  local summary=$(create_completion_summary "failed" "" "$error_message")
 
-Exit code: ${exit_code}
-EOF
-)" >/dev/null 2>&1 || true
+  gh issue comment "${ISSUE_NUMBER}" -R "${REPO}" --body "${summary}${error_details}${log_tail}
+
+Exit code: ${exit_code}" >/dev/null 2>&1 || true
 
   echo "=== Agent failed ==="
   exit "${exit_code}"
@@ -200,6 +370,9 @@ git config --global user.email "github-agent[bot]@users.noreply.github.com"
 
 echo "GitHub CLI authentication successful"
 set_signal_label "${SIGNAL_LABEL_RUNNING}"
+
+# Update task status to running
+update_task_metadata "running" "" ""
 
 # --- Clone repo ---
 CURRENT_STAGE="clone repository"
