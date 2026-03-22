@@ -380,6 +380,9 @@ echo "Cloning ${REPO}..."
 gh repo clone "${REPO}" repo -- --depth=50
 cd repo
 
+# Fix git remote URL for push authentication
+git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+
 # --- Checkout resolved commit SHA ---
 echo "Checking out resolved commit SHA: $RESOLVED_COMMIT_SHA"
 if ! git checkout "$RESOLVED_COMMIT_SHA"; then
@@ -403,26 +406,30 @@ echo "Successfully checked out commit $RESOLVED_COMMIT_SHA"
 CURRENT_STAGE="fetch issue context"
 echo "Fetching context for #${ISSUE_NUMBER}..."
 if [ "${IS_PR}" = "true" ]; then
-  if ! CONTEXT=$(gh pr view "${ISSUE_NUMBER}" -R "${REPO}" --json number,title,body,comments,labels,headRefName,baseRefName,files \
-    --template '## PR #{{.number}}: {{.title}}
-Base: {{.baseRefName}} <- Head: {{.headRefName}}
-Labels: {{range .labels}}{{.name}}, {{end}}
+  # Capture stderr for better error diagnosis
+  PR_STDERR="${AGENT_LOG}.pr_stderr"
 
-### Description
-{{.body}}
+  # Use JSON + jq instead of template to avoid container formatting issues
+  if ! PR_JSON=$(gh pr view "${ISSUE_NUMBER}" -R "${REPO}" --json number,title,body,headRefName,baseRefName 2>"${PR_STDERR}"); then
+    echo "ERROR: gh pr view failed:" >&2
+    if [ -f "${PR_STDERR}" ]; then
+      cat "${PR_STDERR}" >&2
+      cat "${PR_STDERR}" >> "${AGENT_LOG}"
+    fi
+    exit 1
+  fi
 
-### Changed Files
-{{range .files}}{{.path}} (+{{.additions}} -{{.deletions}})
-{{end}}
+  # Format the basic PR info
+  CONTEXT=$(echo "$PR_JSON" | jq -r '"## PR #\(.number): \(.title)\nBase: \(.baseRefName) <- Head: \(.headRefName)\n\n### Description\n\(.body // "(no description)")"')
+
+  # Get comments separately to avoid complex templating
+  if COMMENTS=$(gh api "repos/${REPO}/pulls/${ISSUE_NUMBER}/comments" 2>/dev/null | jq -r '.[] | "**\(.user.login)**: \(.body)"'); then
+    if [ -n "$COMMENTS" ]; then
+      CONTEXT="${CONTEXT}
 
 ### Comments
-{{range .comments}}**{{.author.login}}** ({{.createdAt}}):
-{{.body}}
-
-{{end}}' 2>"${AGENT_LOG}"); then
-    echo "ERROR: gh pr view failed:" >&2
-    cat "${AGENT_LOG}" >&2
-    exit 1
+${COMMENTS}"
+    fi
   fi
 
   # Also get the diff
@@ -431,7 +438,18 @@ Labels: {{range .labels}}{{.name}}, {{end}}
 
 ### Diff
 ${DIFF}"
+
+  # For PRs, checkout the branch instead of staying on detached HEAD
+  # This fixes push issues when making changes to the PR
+  echo "Checking out PR branch for easier modification..."
+  if ! gh pr checkout "${ISSUE_NUMBER}" -R "${REPO}" 2>>"${AGENT_LOG}"; then
+    echo "WARNING: Could not checkout PR branch, staying on commit SHA ${RESOLVED_COMMIT_SHA}" >&2
+    echo "This may cause issues if the agent needs to push changes." >&2
+  fi
 else
+  # Capture stderr for better error diagnosis
+  ISSUE_STDERR="${AGENT_LOG}.issue_stderr"
+
   if ! CONTEXT=$(gh issue view "${ISSUE_NUMBER}" -R "${REPO}" --json number,title,body,comments,labels \
     --template '## Issue #{{.number}}: {{.title}}
 Labels: {{range .labels}}{{.name}}, {{end}}
@@ -443,9 +461,12 @@ Labels: {{range .labels}}{{.name}}, {{end}}
 {{range .comments}}**{{.author.login}}** ({{.createdAt}}):
 {{.body}}
 
-{{end}}' 2>"${AGENT_LOG}"); then
+{{end}}' 2>"${ISSUE_STDERR}"); then
     echo "ERROR: gh issue view failed:" >&2
-    cat "${AGENT_LOG}" >&2
+    if [ -f "${ISSUE_STDERR}" ]; then
+      cat "${ISSUE_STDERR}" >&2
+      cat "${ISSUE_STDERR}" >> "${AGENT_LOG}"
+    fi
     exit 1
   fi
 fi
