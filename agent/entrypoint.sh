@@ -510,6 +510,78 @@ Your mission:
 - Be concise. Make minimal, focused changes. Don't refactor unrelated code."
 fi
 
+# =============================================================
+# PRE-FLIGHT CHECKS — fail fast before burning an LLM call
+# =============================================================
+CURRENT_STAGE="pre-flight checks"
+PREFLIGHT_FAILURES=0
+
+echo "=== Running pre-flight checks ==="
+
+# 1. OpenRouter connectivity + credits
+echo "[preflight] Checking OpenRouter API access..."
+OR_RESPONSE=$(curl -sf -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
+  "https://openrouter.ai/api/v1/auth/key" 2>&1) || {
+  echo "[preflight] FAIL: Cannot reach OpenRouter API" >&2
+  echo "$OR_RESPONSE" >> "${AGENT_LOG}"
+  PREFLIGHT_FAILURES=$((PREFLIGHT_FAILURES + 1))
+}
+if [ "${PREFLIGHT_FAILURES}" -eq 0 ]; then
+  OR_LIMIT=$(echo "$OR_RESPONSE" | jq -r '.data.limit // 0')
+  OR_USAGE=$(echo "$OR_RESPONSE" | jq -r '.data.usage // 0')
+  OR_REMAINING=$(echo "$OR_RESPONSE" | jq -r '.data.limit_remaining // 0')
+  echo "[preflight] OpenRouter credits: used=${OR_USAGE}, remaining=${OR_REMAINING}, limit=${OR_LIMIT}"
+  if [ "$(echo "$OR_REMAINING" | cut -d. -f1)" -le 0 ] 2>/dev/null; then
+    echo "[preflight] FAIL: OpenRouter has no remaining credits" >&2
+    PREFLIGHT_FAILURES=$((PREFLIGHT_FAILURES + 1))
+  fi
+fi
+
+# 2. Model availability
+echo "[preflight] Checking model availability..."
+MODEL_CHECK=$(curl -sf "https://openrouter.ai/api/v1/models" 2>&1 | \
+  jq -r '.data[] | select(.id == "anthropic/claude-sonnet-4") | .id' 2>/dev/null) || true
+if [ -z "$MODEL_CHECK" ]; then
+  echo "[preflight] WARN: Could not verify model anthropic/claude-sonnet-4 on OpenRouter" >&2
+  # Warning only — model list endpoint may be slow/unavailable
+fi
+
+# 3. Git push access (for issue tasks that need to create branches)
+if [ "${IS_PR}" != "true" ]; then
+  echo "[preflight] Checking git push access..."
+  if ! git ls-remote --exit-code origin HEAD >/dev/null 2>&1; then
+    echo "[preflight] FAIL: Cannot push to ${REPO} — check x-access-token URL" >&2
+    PREFLIGHT_FAILURES=$((PREFLIGHT_FAILURES + 1))
+  fi
+fi
+
+# 4. gh API access for creating PRs/comments
+echo "[preflight] Checking GitHub API write access..."
+# Test that we can read issue/PR (write access verified by label operations already working)
+if ! gh api "repos/${REPO}/issues/${ISSUE_NUMBER}" --jq '.number' >/dev/null 2>&1; then
+  echo "[preflight] FAIL: Cannot read issue/PR #${ISSUE_NUMBER} via API" >&2
+  PREFLIGHT_FAILURES=$((PREFLIGHT_FAILURES + 1))
+fi
+
+# 5. Check for aws CLI (needed for S3 artifact uploads)
+if ! command -v aws >/dev/null 2>&1; then
+  echo "[preflight] WARN: aws CLI not found — S3 artifact uploads will be skipped" >&2
+  # Warning only — agent can still function without artifacts
+fi
+
+# 6. Check claude CLI exists
+if ! command -v claude >/dev/null 2>&1; then
+  echo "[preflight] FAIL: claude CLI not found in PATH" >&2
+  PREFLIGHT_FAILURES=$((PREFLIGHT_FAILURES + 1))
+fi
+
+echo "=== Pre-flight checks complete: ${PREFLIGHT_FAILURES} failure(s) ==="
+
+if [ "${PREFLIGHT_FAILURES}" -gt 0 ]; then
+  echo "Aborting: pre-flight checks failed" >&2
+  exit 1
+fi
+
 # --- Run Claude Code with OpenRouter ---
 # OpenRouter's Claude Code compatibility layer expects the base API path and auth token envs.
 export ANTHROPIC_BASE_URL="https://openrouter.ai/api"
