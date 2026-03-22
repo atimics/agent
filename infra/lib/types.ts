@@ -129,7 +129,7 @@ export interface TaskPayload {
   /** Issue or PR metadata */
   issue_metadata: IssueMetadata;
   /** Task execution mode */
-  task_mode: "issue" | "pull_request";
+  task_mode: "issue" | "pull_request" | "planning";
   /** Timestamp when task was created */
   created_at: string;
   /** Model to use for this task, defaults based on task type if not specified */
@@ -175,7 +175,7 @@ export interface TaskMetadata {
   /** Issue or PR number */
   issue_number: number;
   /** Task execution mode */
-  task_mode: "issue" | "pull_request";
+  task_mode: "issue" | "pull_request" | "planning";
   /** Current lifecycle state */
   status: TaskLifecycleState;
   /** The original reference that was requested */
