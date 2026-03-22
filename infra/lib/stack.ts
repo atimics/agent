@@ -19,6 +19,7 @@ const PARAM_GITHUB_APP_ID = "/github-agent/GITHUB_APP_ID";
 const PARAM_GITHUB_APP_PRIVATE_KEY = "/github-agent/GITHUB_APP_PRIVATE_KEY";
 const PARAM_WEBHOOK_SECRET = "/github-agent/GITHUB_WEBHOOK_SECRET";
 const PARAM_OPENROUTER_KEY = "/github-agent/OPENROUTER_API_KEY";
+const PARAM_ANTHROPIC_KEY = "/github-agent/ANTHROPIC_API_KEY";
 
 export class GitHubAgentStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -29,6 +30,7 @@ export class GitHubAgentStack extends cdk.Stack {
       PARAM_GITHUB_APP_PRIVATE_KEY,
       PARAM_WEBHOOK_SECRET,
       PARAM_OPENROUTER_KEY,
+      PARAM_ANTHROPIC_KEY,
     ].map(
       (name) =>
         `arn:aws:ssm:${this.region}:${this.account}:parameter${name}`
@@ -138,10 +140,21 @@ export class GitHubAgentStack extends cdk.Stack {
     });
 
     // -------------------------------------------------------
-    // ECR Repository
+    // ECR Repositories
     // -------------------------------------------------------
     const repository = new ecr.Repository(this, "AgentRepo", {
       repositoryName: "github-agent",
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      lifecycleRules: [
+        {
+          maxImageCount: 5,
+          description: "Keep only 5 images",
+        },
+      ],
+    });
+
+    const reviewRepository = new ecr.Repository(this, "ReviewAgentRepo", {
+      repositoryName: "github-agent-review",
       removalPolicy: cdk.RemovalPolicy.RETAIN,
       lifecycleRules: [
         {
@@ -189,6 +202,40 @@ export class GitHubAgentStack extends cdk.Stack {
       image: ecs.ContainerImage.fromEcrRepository(repository, "latest"),
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: "github-agent",
+        logRetention: logs.RetentionDays.TWO_WEEKS,
+      }),
+    });
+
+    // -------------------------------------------------------
+    // Review Fargate Task Definition
+    // -------------------------------------------------------
+    const reviewTaskRole = new iam.Role(this, "ReviewTaskRole", {
+      assumedBy: new iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
+      description: "Role for GitHub review agent Fargate task",
+    });
+
+    reviewTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: ssmParamArns,
+      })
+    );
+
+    // Grant S3 permissions for review artifacts
+    artifactsBucket.grantReadWrite(reviewTaskRole);
+
+    const reviewTaskDefinition = new ecs.FargateTaskDefinition(this, "ReviewAgentTask", {
+      memoryLimitMiB: 2048,
+      cpu: 1024,
+      taskRole: reviewTaskRole,
+    });
+
+    const reviewContainerName = "review-agent";
+
+    reviewTaskDefinition.addContainer(reviewContainerName, {
+      image: ecs.ContainerImage.fromEcrRepository(reviewRepository, "latest"),
+      logging: ecs.LogDrivers.awsLogs({
+        streamPrefix: "github-agent-review",
         logRetention: logs.RetentionDays.TWO_WEEKS,
       }),
     });
@@ -251,6 +298,62 @@ export class GitHubAgentStack extends cdk.Stack {
     artifactsBucket.grantReadWrite(webhookHandler);
 
     // -------------------------------------------------------
+    // Lambda — Review Handler
+    // -------------------------------------------------------
+    const reviewHandler = new NodejsFunction(this, "ReviewHandler", {
+      entry: path.join(__dirname, "review-handler.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 512,
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        target: "node20",
+        externalModules: [],
+      },
+      environment: {
+        CLUSTER_ARN: cluster.clusterArn,
+        REVIEW_TASK_DEFINITION_ARN: reviewTaskDefinition.taskDefinitionArn,
+        REVIEW_CONTAINER_NAME: reviewContainerName,
+        SUBNETS: vpc.privateSubnets.map((s) => s.subnetId).join(","),
+        SECURITY_GROUP: taskSecurityGroup.securityGroupId,
+        GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
+        GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
+        ANTHROPIC_API_KEY_PARAM: PARAM_ANTHROPIC_KEY,
+        ARTIFACTS_BUCKET: artifactsBucket.bucketName,
+      },
+    });
+
+    reviewHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ecs:RunTask"],
+        resources: [reviewTaskDefinition.taskDefinitionArn],
+      })
+    );
+
+    reviewHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["iam:PassRole"],
+        resources: [
+          reviewTaskDefinition.taskRole.roleArn,
+          reviewTaskDefinition.executionRole!.roleArn,
+        ],
+      })
+    );
+
+    reviewHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: ssmParamArns,
+      })
+    );
+
+    // Grant S3 permissions for review artifacts
+    artifactsBucket.grantReadWrite(reviewHandler);
+
+    // -------------------------------------------------------
     // Cleanup/Reaper Lambda
     // -------------------------------------------------------
     const cleanupFunction = new NodejsFunction(this, "CleanupFunction", {
@@ -298,6 +401,22 @@ export class GitHubAgentStack extends cdk.Stack {
     cleanupRule.addTarget(new targets.LambdaFunction(cleanupFunction));
 
     // -------------------------------------------------------
+    // EventBridge rule to trigger review handler
+    // -------------------------------------------------------
+    const reviewRule = new events.Rule(this, "ReviewRule", {
+      description: "Trigger review of coding agent PRs",
+      schedule: events.Schedule.cron({
+        minute: "*/15", // Every 15 minutes
+        hour: "*",
+        day: "*",
+        month: "*",
+        year: "*",
+      }),
+    });
+
+    reviewRule.addTarget(new targets.LambdaFunction(reviewHandler));
+
+    // -------------------------------------------------------
     // API Gateway HTTP API
     // -------------------------------------------------------
     const httpApi = new apigwv2.HttpApi(this, "WebhookApi", {
@@ -325,6 +444,11 @@ export class GitHubAgentStack extends cdk.Stack {
     new cdk.CfnOutput(this, "EcrRepositoryUri", {
       value: repository.repositoryUri,
       description: "ECR repository URI for pushing agent images",
+    });
+
+    new cdk.CfnOutput(this, "EcrReviewRepositoryUri", {
+      value: reviewRepository.repositoryUri,
+      description: "ECR repository URI for pushing review agent images",
     });
 
     new cdk.CfnOutput(this, "ClusterName", {
