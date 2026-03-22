@@ -384,20 +384,22 @@ cd repo
 git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
 
 # --- Checkout resolved commit SHA ---
-echo "Checking out resolved commit SHA: $RESOLVED_COMMIT_SHA"
-if ! git checkout "$RESOLVED_COMMIT_SHA"; then
-  echo "ERROR: Failed to checkout commit SHA $RESOLVED_COMMIT_SHA"
-  echo "This commit may not exist or may not be accessible"
-  exit 1
+# For PRs, the SHA is on the PR branch — not in the shallow main clone.
+# Fetch it explicitly before attempting checkout.
+if [ "${IS_PR}" = "true" ]; then
+  echo "Fetching PR ref for commit $RESOLVED_COMMIT_SHA..."
+  git fetch origin "pull/${ISSUE_NUMBER}/head" --depth=50 2>&1 || true
 fi
 
-# Verify we're on the correct commit
-CURRENT_SHA=$(git rev-parse HEAD)
-if [ "$CURRENT_SHA" != "$RESOLVED_COMMIT_SHA" ]; then
-  echo "ERROR: Checkout verification failed"
-  echo "Expected SHA: $RESOLVED_COMMIT_SHA"
-  echo "Current SHA:  $CURRENT_SHA"
-  exit 1
+echo "Checking out resolved commit SHA: $RESOLVED_COMMIT_SHA"
+if ! git checkout "$RESOLVED_COMMIT_SHA" 2>&1; then
+  echo "ERROR: Failed to checkout commit SHA $RESOLVED_COMMIT_SHA"
+  echo "Attempting full fetch..." >&2
+  git fetch --unshallow 2>&1 || git fetch origin 2>&1 || true
+  if ! git checkout "$RESOLVED_COMMIT_SHA" 2>&1; then
+    echo "ERROR: Still cannot checkout $RESOLVED_COMMIT_SHA after full fetch"
+    exit 1
+  fi
 fi
 
 echo "Successfully checked out commit $RESOLVED_COMMIT_SHA"
