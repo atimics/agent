@@ -406,24 +406,30 @@ echo "Successfully checked out commit $RESOLVED_COMMIT_SHA"
 CURRENT_STAGE="fetch issue context"
 echo "Fetching context for #${ISSUE_NUMBER}..."
 if [ "${IS_PR}" = "true" ]; then
-  # Capture stderr for better error diagnosis
-  PR_STDERR="${AGENT_LOG}.pr_stderr"
+  echo "Fetching PR context via API..."
 
-  # Use JSON + jq instead of template to avoid container formatting issues
-  if ! PR_JSON=$(gh pr view "${ISSUE_NUMBER}" -R "${REPO}" --json number,title,body,headRefName,baseRefName 2>"${PR_STDERR}"); then
-    echo "ERROR: gh pr view failed:" >&2
-    if [ -f "${PR_STDERR}" ]; then
-      cat "${PR_STDERR}" >&2
-      cat "${PR_STDERR}" >> "${AGENT_LOG}"
-    fi
+  # Use the GitHub REST API directly — more reliable than gh pr view with App tokens
+  PR_JSON=$(gh api "repos/${REPO}/pulls/${ISSUE_NUMBER}" 2>&1) || {
+    echo "ERROR: Failed to fetch PR via API:" >&2
+    echo "$PR_JSON" >&2
+    echo "$PR_JSON" >> "${AGENT_LOG}"
     exit 1
-  fi
+  }
 
-  # Format the basic PR info
-  CONTEXT=$(echo "$PR_JSON" | jq -r '"## PR #\(.number): \(.title)\nBase: \(.baseRefName) <- Head: \(.headRefName)\n\n### Description\n\(.body // "(no description)")"')
+  PR_TITLE=$(echo "$PR_JSON" | jq -r '.title // "(no title)"')
+  PR_BODY=$(echo "$PR_JSON" | jq -r '.body // "(no description)"')
+  PR_HEAD_REF=$(echo "$PR_JSON" | jq -r '.head.ref')
+  PR_BASE_REF=$(echo "$PR_JSON" | jq -r '.base.ref')
 
-  # Get comments separately to avoid complex templating
-  if COMMENTS=$(gh api "repos/${REPO}/pulls/${ISSUE_NUMBER}/comments" 2>/dev/null | jq -r '.[] | "**\(.user.login)**: \(.body)"'); then
+  CONTEXT="## PR #${ISSUE_NUMBER}: ${PR_TITLE}
+Base: ${PR_BASE_REF} <- Head: ${PR_HEAD_REF}
+
+### Description
+${PR_BODY}"
+
+  # Get issue comments (PR comments are on the issues endpoint)
+  if COMMENTS=$(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}/comments" 2>/dev/null \
+    | jq -r '.[] | "**\(.user.login)**: \(.body)"' 2>/dev/null); then
     if [ -n "$COMMENTS" ]; then
       CONTEXT="${CONTEXT}
 
@@ -432,19 +438,19 @@ ${COMMENTS}"
     fi
   fi
 
-  # Also get the diff
-  DIFF=$(gh pr diff "${ISSUE_NUMBER}" -R "${REPO}" 2>/dev/null | head -c 20000 || echo "(diff too large or unavailable)")
+  # Get the diff
+  DIFF=$(gh api "repos/${REPO}/pulls/${ISSUE_NUMBER}" -H "Accept: application/vnd.github.v3.diff" 2>/dev/null \
+    | head -c 20000 || echo "(diff too large or unavailable)")
   CONTEXT="${CONTEXT}
 
 ### Diff
 ${DIFF}"
 
-  # For PRs, checkout the branch instead of staying on detached HEAD
-  # This fixes push issues when making changes to the PR
-  echo "Checking out PR branch for easier modification..."
-  if ! gh pr checkout "${ISSUE_NUMBER}" -R "${REPO}" 2>>"${AGENT_LOG}"; then
+  # Checkout the PR branch for easier modification
+  echo "Checking out PR branch ${PR_HEAD_REF}..."
+  git fetch origin "${PR_HEAD_REF}" 2>>"${AGENT_LOG}" || true
+  if ! git checkout "${PR_HEAD_REF}" 2>>"${AGENT_LOG}"; then
     echo "WARNING: Could not checkout PR branch, staying on commit SHA ${RESOLVED_COMMIT_SHA}" >&2
-    echo "This may cause issues if the agent needs to push changes." >&2
   fi
 else
   # Capture stderr for better error diagnosis
