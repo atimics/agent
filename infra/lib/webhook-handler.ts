@@ -455,7 +455,7 @@ export async function handler(event: {
         awsvpcConfiguration: {
           subnets: SUBNETS.split(","),
           securityGroups: [SECURITY_GROUP],
-          assignPublicIp: "ENABLED",
+          assignPublicIp: "DISABLED",
         },
       },
       overrides: {
