@@ -342,6 +342,12 @@ has_agent_question_comment() {
   ' >/dev/null <<<"${comments_json}"
 }
 
+issue_was_closed() {
+  local state
+  state=$(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}" --jq '.state' 2>/dev/null)
+  [ "$state" = "closed" ]
+}
+
 # --- Auth gh CLI ---
 CURRENT_STAGE="authenticate GitHub CLI"
 echo "Setting up GitHub CLI authentication..."
@@ -495,6 +501,20 @@ Your mission:
 - Be concise. Make minimal, focused changes.
 
 Note: You are working on commit SHA ${RESOLVED_COMMIT_SHA} which was the head of the PR when this task was created."
+elif [ "${TASK_MODE}" = "planning" ]; then
+  MISSION="You have been triggered by the 'agent' label on issue #${ISSUE_NUMBER} in ${REPO}.
+
+Here is the issue context:
+${CONTEXT}
+
+Your mission:
+- Understand the planning task described in the issue
+- Create any necessary issues, analysis, or planning artifacts as requested
+- Post your results as comments on this issue
+- When done with all deliverables, close this issue using: gh issue close ${ISSUE_NUMBER}
+- Be thorough in your analysis and clear in your communications.
+
+When you close the issue, the system will detect this and mark your work as complete."
 else
   MISSION="You have been triggered by the 'agent' label on issue #${ISSUE_NUMBER} in ${REPO}.
 
@@ -506,6 +526,7 @@ Your mission:
 - Make the code changes needed to resolve the issue
 - Create a new branch, commit your changes, and push
 - Create a PR that references this issue using: gh pr create --title '<title>' --body 'Fixes #${ISSUE_NUMBER}\n\n<description>'
+- If your task does NOT require code changes (e.g., creating issues, analysis, planning), post your results as a comment and close this issue when done using: gh issue close ${ISSUE_NUMBER}
 - If you need more information to proceed, post a comment asking for clarification using: gh issue comment ${ISSUE_NUMBER} --body '<your question>'
 - Be concise. Make minimal, focused changes. Don't refactor unrelated code."
 fi
@@ -626,6 +647,8 @@ while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
   if [ "${IS_PR}" = "true" ]; then
     RUN_STATUS="succeeded"
   elif PR_URL="$(find_created_pr_url)" && [ -n "${PR_URL}" ]; then
+    RUN_STATUS="succeeded"
+  elif issue_was_closed; then
     RUN_STATUS="succeeded"
   elif has_agent_question_comment; then
     RUN_STATUS="waiting"

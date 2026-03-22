@@ -215,8 +215,11 @@ async function getRepoModelConfig(
   }
 }
 
-function getDefaultModel(taskMode: "issue" | "pull_request"): string {
+function getDefaultModel(taskMode: "issue" | "pull_request" | "planning"): string {
   // Use latest 4.6 models per comment in issue #29
+  if (taskMode === "planning") {
+    return "anthropic/claude-haiku-4-5";
+  }
   return taskMode === "issue"
     ? "anthropic/claude-haiku-4-5"
     : "anthropic/claude-sonnet-4-6";
@@ -620,8 +623,15 @@ export async function handler(event: {
     author: isPR ? prData.user.login : issueData.user.login,
   };
 
-  // --- Determine model to use ---
-  const taskMode = isPR ? "pull_request" : "issue";
+  // --- Determine task mode ---
+  let taskMode: "issue" | "pull_request" | "planning";
+  if (isPR) {
+    taskMode = "pull_request";
+  } else if (labels.includes("planning")) {
+    taskMode = "planning";
+  } else {
+    taskMode = "issue";
+  }
   let selectedModel = getDefaultModel(taskMode);
 
   // Check for per-repo model override
