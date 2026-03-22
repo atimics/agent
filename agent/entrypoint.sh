@@ -527,12 +527,14 @@ OR_RESPONSE=$(curl -sf -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
   PREFLIGHT_FAILURES=$((PREFLIGHT_FAILURES + 1))
 }
 if [ "${PREFLIGHT_FAILURES}" -eq 0 ]; then
-  OR_LIMIT=$(echo "$OR_RESPONSE" | jq -r '.data.limit // 0')
+  OR_LIMIT=$(echo "$OR_RESPONSE" | jq -r '.data.limit // "unlimited"')
   OR_USAGE=$(echo "$OR_RESPONSE" | jq -r '.data.usage // 0')
-  OR_REMAINING=$(echo "$OR_RESPONSE" | jq -r '.data.limit_remaining // 0')
+  OR_REMAINING=$(echo "$OR_RESPONSE" | jq -r '.data.limit_remaining // "unlimited"')
   echo "[preflight] OpenRouter credits: used=${OR_USAGE}, remaining=${OR_REMAINING}, limit=${OR_LIMIT}"
-  if [ "$(echo "$OR_REMAINING" | cut -d. -f1)" -le 0 ] 2>/dev/null; then
-    echo "[preflight] FAIL: OpenRouter has no remaining credits" >&2
+  # Only fail if there's a numeric limit AND remaining is <= 0
+  # null/unlimited means pay-as-you-go (no cap)
+  if [ "$OR_REMAINING" != "unlimited" ] && [ "$(echo "$OR_REMAINING" | cut -d. -f1)" -le 0 ] 2>/dev/null; then
+    echo "[preflight] FAIL: OpenRouter has no remaining credits (limit=${OR_LIMIT}, remaining=${OR_REMAINING})" >&2
     PREFLIGHT_FAILURES=$((PREFLIGHT_FAILURES + 1))
   fi
 fi
