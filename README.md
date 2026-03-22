@@ -16,6 +16,8 @@ To trigger the agent on an issue or PR:
 - **Agent Container** - Runs Claude Code in AWS Fargate
 - **Infrastructure** - AWS CDK deployment in `infra/`
 
+For security architecture and isolation controls, see [SECURITY.md](./SECURITY.md).
+
 ## Agent Workflow
 
 ### Label Semantics
